@@ -1,0 +1,13 @@
+node_modules/
+build/
+.gradle/
+local.properties
+*.jks
+*.keystore
+signing.properties
+keystore.properties
+*.apk
+kit/
+private/
+site/_dl/
+__pycache__/

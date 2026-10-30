@@ -1,0 +1,67 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace "bot.tab.sites.avermessage"
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "bot.tab.sites.avermessage"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    // release signing: properties file kept OUTSIDE this source tree (env AVM_MSG_SIGNING_PROPS) with
+    // storeFile, storePassword, keyAlias, keyPassword. Every future update must be signed with this same key.
+    def ksFile = file(System.getenv('AVM_MSG_SIGNING_PROPS') ?: rootProject.file('../../kit/signing.properties').path)
+    signingConfigs {
+        release {
+            if (ksFile.exists()) {
+                def p = new Properties(); ksFile.withInputStream { p.load(it) }
+                storeFile file(p['storeFile']); storePassword p['storePassword']; keyAlias p['keyAlias']; keyPassword p['keyPassword']
+            }
+        }
+    }
+    testOptions { unitTests.returnDefaultValues = true }
+    buildTypes {
+        release {
+            if (ksFile.exists()) signingConfig signingConfigs.release
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

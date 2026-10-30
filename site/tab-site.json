@@ -1,0 +1,6 @@
+{
+ "kind": "worker",
+ "entry": "_worker.js",
+ "bindings": [ { "type": "d1", "name": "DB" }, { "type": "r2", "name": "FILES" } ],
+ "worker": { "compatibility_date": "2026-08-01", "compatibility_flags": ["nodejs_compat"], "html_handling": "auto-trailing-slash", "not_found_handling": "none" }
+}

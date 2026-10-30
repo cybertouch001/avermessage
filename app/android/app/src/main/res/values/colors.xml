@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="avm_dark">#0F1020</color>
+    <color name="avm_indigo">#3F2FC9</color>
+    <color name="avm_violet">#7A3AE6</color>
+    <color name="colorPrimary">#3F2FC9</color>
+    <color name="colorPrimaryDark">#3F2FC9</color>
+    <color name="colorAccent">#7A3AE6</color>
+</resources>

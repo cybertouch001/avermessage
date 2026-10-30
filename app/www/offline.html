@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Avermessage</title>
+<style>
+html,body{margin:0;height:100%;background:#0F1020;color:#EDEBFF;font-family:system-ui,-apple-system,Roboto,"Noto Sans",sans-serif}
+.w{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:32px;box-sizing:border-box}
+img{width:96px;height:96px;border-radius:24px;margin-bottom:24px}
+h1{font-size:20px;margin:0 0 8px}p{margin:0 0 24px;opacity:.75;line-height:1.5;max-width:320px}
+button{background:linear-gradient(135deg,#4B38DC,#7A3AE6);color:#fff;border:0;border-radius:24px;padding:12px 32px;font-size:16px;font-weight:600}
+small{display:block;margin-top:16px;opacity:.5}
+</style></head><body><div class="w">
+<img src="icon.png" alt="">
+<h1 id="t">You're offline</h1>
+<p id="m">Avermessage couldn't reach the server. Check your internet connection and try again.<br>इंटरनेट कनेक्शन जाँचें और फिर कोशिश करें।</p>
+<button id="b" type="button">Try again</button>
+<small id="s"></small>
+</div><script>
+var HOME='https://avermessage.sites.tab.bot/';
+function go(){document.getElementById('s').textContent='Connecting…';location.replace(HOME);}
+document.getElementById('b').onclick=go;
+window.addEventListener('online',function(){setTimeout(go,800);});
+var n=0;var iv=setInterval(function(){ if(navigator.onLine){n++; if(n>=3){clearInterval(iv);go();}} },10000);
+</script></body></html>
