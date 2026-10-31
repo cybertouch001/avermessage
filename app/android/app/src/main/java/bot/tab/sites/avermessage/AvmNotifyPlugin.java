@@ -15,6 +15,8 @@ import com.getcapacitor.annotation.CapacitorPlugin;
  *   loggedOut()          forget the login, stop the service, clear notifications
  *   openSetup() / openBattery() / openAutostart()
  *   takePendingChat()    {chat} the chat a tapped notification asked to open (once)
+ *   setE2EKey({uid, pkcs8, pub})  keep the encryption key (Keystore-protected) so notifications can show encrypted text
+ *   saveFile({name, mime, data})  save a decrypted file (base64) into Downloads/AverChat -> {where}
  */
 @CapacitorPlugin(name = "AvmNotify")
 public class AvmNotifyPlugin extends Plugin {
@@ -56,6 +58,7 @@ public class AvmNotifyPlugin extends Plugin {
     public void loggedOut(PluginCall call) {
         try {
             AvmNotifier.clearToken(getContext());
+            AvmE2E.clear(getContext());
             InstantService.stop(getContext());
             AvmNotifier.cancelAll(getContext());
         } catch (Throwable ignored) {}
@@ -77,5 +80,37 @@ public class AvmNotifyPlugin extends Plugin {
         String c = MainActivity.takePendingChat();
         if (c != null) r.put("chat", c);
         call.resolve(r);
+    }
+
+    @PluginMethod
+    public void setE2EKey(PluginCall call) {
+        AvmE2E.setKey(getContext(), call.getString("uid"), call.getString("pkcs8"));
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void saveFile(PluginCall call) {
+        try {
+            String name = call.getString("name", "file"); String mime = call.getString("mime", "application/octet-stream");
+            name = name.replaceAll("[\\\\/:*?\"<>|\\x00-\\x1f]", "_"); if (name.isEmpty()) name = "file";
+            byte[] data = android.util.Base64.decode(call.getString("data", ""), android.util.Base64.NO_WRAP);
+            String where;
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                android.content.ContentValues v = new android.content.ContentValues();
+                v.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name);
+                v.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime);
+                v.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/AverChat");
+                android.net.Uri u = getContext().getContentResolver().insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                if (u == null) throw new Exception("no uri");
+                try (java.io.OutputStream o = getContext().getContentResolver().openOutputStream(u)) { o.write(data); }
+                where = "Downloads/AverChat";
+            } else {
+                java.io.File dir = new java.io.File(getContext().getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS), "AverChat");
+                dir.mkdirs(); java.io.File f = new java.io.File(dir, name);
+                try (java.io.FileOutputStream o = new java.io.FileOutputStream(f)) { o.write(data); }
+                where = f.getParent();
+            }
+            JSObject r = new JSObject(); r.put("where", where); call.resolve(r);
+        } catch (Throwable t) { call.reject("Could not save the file"); }
     }
 }

@@ -1,6 +1,6 @@
 // AverChat — boot, auth, shell, sync loop, chat list.
 import { nav, goBack, App, S, LS, t, $, $$, esc, el, api, toast, avatar, ICON, fmtListTime, previewText, chatTitle, chatAvatarObj, nameOf, openModal, closeTopModal, modalStack, sheet, confirmBox, prompt2, longPress, isApp, plug, lang, fileUrl, uid } from './util.js';
-import './brand.js'; import './chat.js'; import './media.js'; import './call.js'; import './status.js'; import './settings.js'; import './extras.js';
+import './e2e.js'; import './brand.js'; import './chat.js'; import './media.js'; import './call.js'; import './status.js'; import './settings.js'; import './extras.js';
 
 const drawers = [];
 // ---------- theme ----------
@@ -45,13 +45,16 @@ function renderAuth(mode = 'login') {
   $('#langbtn').onclick = () => { LS.set('lang', lang() === 'hi' ? 'en' : 'hi'); renderAuth(mode); };
   $('#authf').onsubmit = async (e) => {
     e.preventDefault(); const f = new FormData(e.target); const body = Object.fromEntries(f.entries()); const btn = e.target.querySelector('button'); btn.disabled = true; $('#autherr').textContent = '';
-    try { const r = await api(mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', { body }); S.me = r.user; if (mode === 'signup') { S.me.settings = { ...(S.me.settings || {}), lang: lang() }; api('/api/me', { method: 'PATCH', body: { settings: S.me.settings } }).catch(() => {}); } await start(); }
+    try { const r = await api(mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', { body }); S.me = r.user; if (mode === 'signup') { S.me.settings = { ...(S.me.settings || {}), lang: lang() }; api('/api/me', { method: 'PATCH', body: { settings: S.me.settings } }).catch(() => {}); } try { btn.textContent = '🔒 …'; await App.E2E.afterPassword(body.password, S.me); } catch {} await start(); }
     catch (er) { $('#autherr').textContent = er.message; btn.disabled = false; }
   };
 }
 App.loggedOut = () => { if (!S.me) return; S.me = null; stopSync(); location.reload(); };
-export async function logout() { try { await api('/api/auth/logout', { body: {} }); } catch {} try { const N = plug('AvmNotify'); if (N) await N.loggedOut(); } catch {} S.me = null; stopSync(); location.href = '/'; }
+export async function logout() { try { await api('/api/auth/logout', { body: {} }); } catch {} try { await App.E2E.forget(); } catch {} try { const N = plug('AvmNotify'); if (N) await N.loggedOut(); } catch {} S.me = null; stopSync(); location.href = '/'; }
 App.logout = logout;
+if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) window.__avm = { App, S }; // local test runs only
+// encryption was just unlocked / turned on: reload chats so encrypted messages open
+App.reloadAfterE2E = async () => { try { S.msgs.clear(); await loadChats(); renderList && renderList(); if (S.open) { const id = S.open; App.openChat(id); } } catch {} };
 
 // ---------- boot ----------
 async function boot() {
@@ -69,6 +72,7 @@ function bootError(e) { const b = App.brand(); $('#root').innerHTML = `<div clas
 async function start(meResp) {
   if (!meResp) { const r = await api('/api/me'); S.me = r.user; S.ice = r.ice; }
   await App.loadConfig();
+  if (!App.E2E.ready) { try { await App.E2E.init(); } catch {} }
   applyTheme(); renderShell(); await loadChats(); startSync(); App.initNotifications && App.initNotifications();
   window.avmOpenChat = async (id) => { try { if (!S.chats.has(id)) await loadChats(); if (S.chats.has(id)) App.openChat(id); } catch {} };
   App.nativeInit && App.nativeInit();
@@ -96,7 +100,7 @@ function renderShell() {
         <button data-t="me">${ICON.user}<span>${t('Me')}</span><i class="tb dot" id="tb-status"></i></button>
       </nav>
     </aside>
-    <main id="main"><div class="empty-main"><img class="brand-logo" src="${App.logoUrl(b)}" alt=""><h2 class="brand-name">${esc(b.app_name)}</h2><p>${t('Pick a chat to start messaging.')}</p><p class="fine">${ICON.shield} ${t('Messages travel over an encrypted connection (HTTPS) and are stored on the server. They are not end-to-end encrypted.')}</p></div></main>
+    <main id="main"><div class="empty-main"><img class="brand-logo" src="${App.logoUrl(b)}" alt=""><h2 class="brand-name">${esc(b.app_name)}</h2><p>${t('Pick a chat to start messaging.')}</p><p class="fine">${ICON.shield} ${t('1:1 and group chats are end-to-end encrypted: only the people in a chat can read its messages and files. Channels and status updates are not.')}</p></div></main>
   </div>`;
   $$('#tabs button[data-t]').forEach((x) => (x.onclick = () => setTab(x.dataset.t)));
   $('#b-menu').onclick = mainMenu;
@@ -320,6 +324,7 @@ async function tick() {
       if (res.status === 401) { App.loggedOut && App.loggedOut(); throw new Error('auth'); }
       if (!res.ok) throw new Error('http ' + res.status);
       r = await res.json();
+      try { if (App.E2E && App.E2E.inbound) await App.E2E.inbound(r); } catch {} // open end-to-end encrypted messages
     } catch (e) { if (ac.signal.aborted && kicked) aborted = true; throw e; } finally { clearTimeout(to); pollAbort = null; }
     failCount = 0; document.body.classList.remove('offline');
     await handleSync(r);

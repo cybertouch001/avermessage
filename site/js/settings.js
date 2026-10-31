@@ -57,7 +57,7 @@ function privacy() {
       <label class="row"><span class="row-main">${t('Read receipts')}<span class="sub">${t('If turned off, you won’t send or receive read receipts in 1:1 chats. Groups always show them.')}</span></span><input type="checkbox" id="pr-rr" ${S.me.read_receipts ? 'checked' : ''}></label></div>
       <div class="card"><button class="row" id="pr-blocked"><span class="ic">${ICON.block}</span><span class="row-main">${t('Blocked contacts')}</span></button>
       <button class="row" id="pr-pin"><span class="ic">${ICON.lock}</span><span class="row-main">${t('Chat lock PIN')}<span class="sub">${S.me.has_pin ? t('On — locked chats need this PIN') : t('Off')}</span></span></button></div>
-      <p class="fine pad">${ICON.shield} ${t('AverChat sends everything over HTTPS and keeps passwords hashed. Messages are stored on the server and are not end-to-end encrypted, so the server owner could technically access them.')}</p>`;
+      <p class="fine pad">${ICON.shield} ${t('Passwords are stored hashed and everything goes over HTTPS. 1:1 and group messages, photos, videos, voice notes and files are end-to-end encrypted on your phone; the server only stores locked data it can’t read. Your encryption key backup is locked with your password. Channels, status updates and messages from before the encryption update are not end-to-end encrypted. Calls are encrypted directly between the phones.')}</p>`;
     $$('[data-p]', d.body).forEach((b) => (b.onclick = () => { const k = b.dataset.p; sheet('', ['all', 'contacts', 'none'].map((v) => ({ label: (S.me[k] === v ? '✓ ' : '') + pv(v), run: async () => { await saveMe({ [k]: v }); render(); } }))); }));
     $('#pr-rr', d.body).onchange = (e) => saveMe({ read_receipts: e.target.checked });
     $('#pr-blocked', d.body).onclick = blocked; $('#pr-pin', d.body).onclick = async () => { await App.setPin(); render(); };
@@ -124,7 +124,7 @@ const uaName = (ua) => { ua = ua || ''; if (/AverChatApp|AverChatApp/.test(ua)) 
 function help() {
   App.openDrawer(t('Help & about'), `<div class="pad"><div class="info-top"><img src="${App.logoUrl()}" width="96" alt=""><h2>${esc(App.brand().app_name)}</h2><p class="muted">${t('Version')} ${esc(S.config.version || '')}</p></div>
     <h3>${t('Tips')}</h3><ul class="tips"><li>${t('Tap and hold (or right-click) a message to reply, react, forward, star, pin, edit or delete it.')}</li><li>${t('Swipe a message to the right to reply.')}</li><li>${t('Tap the microphone to record a voice message; tap send when done.')}</li><li>${t('Format text: *bold*, _italic_, ~strikethrough~.')}</li><li>${t('Lock a chat with a PIN from the chat menu.')}</li></ul>
-    <h3>${t('Privacy & security')}</h3><p class="muted">${t('Passwords are stored as salted hashes. Every connection uses HTTPS. Files and photos can only be opened by members of the chat they were sent in. Messages are stored on the server and are not end-to-end encrypted.')}</p>
+    <h3>${t('Privacy & security')}</h3><p class="muted">${t('Passwords are stored as salted hashes. Every connection uses HTTPS. 1:1 and group chats are end-to-end encrypted (only chat members can read them, not the server or admin). Channels, status updates and older messages from before the update are not end-to-end encrypted.')}</p>
     <h3>${t('Limits')}</h3><p class="muted">${t('Files up to 50 MB. Groups up to 256 members. Calls are one-to-one.')}</p></div>`);
 }
 

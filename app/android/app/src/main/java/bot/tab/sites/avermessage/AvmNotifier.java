@@ -151,7 +151,7 @@ final class AvmNotifier {
                 String chat = m.optString("chat_id", "");
                 if (chat.isEmpty()) continue;
                 if (MainActivity.isChatVisible(chat)) continue;
-                String text = m.optString("text", "New message");
+                String text = AvmE2E.preview(c, m, m.optString("text", "New message"));
                 String line = m.optBoolean("group") ? m.optString("sender", "") + ": " + text : text;
                 List<String> l = lines.get(chat); if (l == null) { l = new ArrayList<>(); lines.put(chat, l); }
                 l.add(line); while (l.size() > 7) l.remove(0);

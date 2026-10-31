@@ -16,7 +16,7 @@
 		"allowMixedContent": false,
 		"captureInput": false,
 		"webContentsDebuggingEnabled": false,
-		"appendUserAgent": "AverChatApp/2.0.1 AvermessageApp/2.0.1"
+		"appendUserAgent": "AverChatApp/2.1.0 AvermessageApp/2.1.0"
 	},
 	"plugins": {
 		"SplashScreen": {

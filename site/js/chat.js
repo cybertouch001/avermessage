@@ -99,12 +99,21 @@ function renderMessages(toBottom, keepFrom) {
   const arr = (S.msgs.get(S.open) || []).filter((m) => !m.expires_at || m.expires_at > Date.now());
   let html = ''; let prev = null;
   if (c.disappearing) html += `<div class="sysmsg">${ICON.timer} ${t('Disappearing messages are on ({d}). New messages vanish after that time.', { d: dLabel(c.disappearing) })}</div>`;
-  html += `<div class="sysmsg enc">${ICON.shield} ${t('Messages are sent over an encrypted connection and stored on the AverChat server (not end-to-end encrypted).')}</div>`;
+  html += `<div class="sysmsg enc" id="encban">${ICON.shield} ${c.channel ? t('Channel messages are not end-to-end encrypted.') : t('Checking encryption…')}</div>`;
   for (const m of arr) { if (!prev || dayKey(prev.deliver_at) !== dayKey(m.deliver_at)) html += `<div class="daysep"><span>${fmtDay(m.deliver_at)}</span></div>`; html += msgHtml(m, prev, c); prev = m; }
-  inner.innerHTML = html; bindMsgs(inner);
+  inner.innerHTML = html; bindMsgs(inner); encBanner(c);
   if (toBottom) box.scrollTop = box.scrollHeight; else if (keepFrom) box.scrollTop = box.scrollHeight - oldH + oldTop;
   // images loading late: keep at bottom
   if (toBottom) $$('img', inner).forEach((i) => i.addEventListener('load', () => { if (box.scrollHeight - box.scrollTop - box.clientHeight < 400) box.scrollTop = box.scrollHeight; }, { once: true }));
+}
+// top-of-chat line: is this chat end-to-end encrypted right now?
+async function encBanner(c) {
+  if (c.channel) return; const E = App.E2E; const n = () => $('#encban'); if (!E || !n()) return;
+  let html;
+  if (!E.ready) html = `🔓 ${t('Encryption is locked on this device.')} <u>${t('Tap to unlock')}</u>`;
+  else if (await E.readyFor(c.id)) html = `🔒 ${t('Messages and files are end-to-end encrypted. Only people in this chat can read them, not even the AverChat admin.')}`;
+  else { const miss = (await E.missing(c.id)) || []; html = `🔓 ${miss.length ? t('Not end-to-end encrypted yet: {n} needs to open the updated AverChat.', { n: miss.slice(0, 3).join(', ') }) : t('Not end-to-end encrypted yet.')}`; }
+  const b = n(); if (!b || S.open !== c.id) return; b.innerHTML = html; b.onclick = !E.ready ? () => E.ask() : null;
 }
 function placeMessage(m, isNew) {
   const inner = $('#msgs-in'); if (!inner) return;
@@ -149,7 +158,8 @@ function msgHtml(m, prev, c) {
     if (m.type === 'call') inner += `<div class="callmsg ${m.meta.status === 'missed' && !mine ? 'missed' : ''}">${m.meta.kind === 'video' ? ICON.video : ICON.phone}<span>${esc(callLabel(m))}</span></div>`;
     if (m.body && m.type !== 'poll') inner += `<div class="txt ${emojiOnly(m.body) && m.type === 'text' ? 'big' : ''}">${linkify(m.body)}</div>`;
   }
-  const meta = `<span class="meta">${m.starred ? `<i class="st">${ICON.star}</i>` : ''}${m.edited_at && !m.deleted ? `<i>${t('edited')}</i>` : ''}${m.expires_at ? `<i class="st">${ICON.timer}</i>` : ''}${fmtTime(m.deliver_at)}${mine && !m.deleted && m.type !== 'call' ? ticks(m, c) : ''}</span>`;
+  const lock = !m.deleted && !m._e2e && !c.channel && m.type !== 'call' && !m.pending ? `<i class="nolock" title="${t('Not end-to-end encrypted')}">🔓</i>` : '';
+  const meta = `<span class="meta">${lock}${m.starred ? `<i class="st">${ICON.star}</i>` : ''}${m.edited_at && !m.deleted ? `<i>${t('edited')}</i>` : ''}${m.expires_at ? `<i class="st">${ICON.timer}</i>` : ''}${fmtTime(m.deliver_at)}${mine && !m.deleted && m.type !== 'call' ? ticks(m, c) : ''}</span>`;
   const reacts = (m.reactions || []).length ? `<button class="reacts" data-r>${[...new Set(m.reactions.map((r) => r.emoji))].slice(0, 4).join('')}${m.reactions.length > 1 ? `<span>${m.reactions.length}</span>` : ''}</button>` : '';
   const media = ['image', 'video'].includes(m.type) && !m.body && !m.deleted;
   return `<div class="msg ${mine ? 'out' : 'in'} ${first ? 'first' : ''} ${m.pending ? 'pending' : ''} ${media ? 'media-only' : ''}" data-id="${m.id}" ${m.client_id ? `data-cid="${esc(m.client_id)}"` : ''}><div class="bubble">${inner}${meta}</div>${reacts}</div>`;
@@ -213,7 +223,7 @@ function msgMenu(m) {
   if (!m.deleted && !c.left && m.type !== 'call') items.push({ icon: ICON.pin, label: pinned ? t('Unpin') : t('Pin'), run: async () => { try { const r = await api(`/api/messages/${m.id}/pin`, { body: { on: !pinned } }); c.pinned_msgs = r.pinned; renderPinned(); } catch (e) { toast(e.message); } } });
   if (canEdit) items.push({ icon: ICON.edit, label: t('Edit'), run: () => setEdit(m) });
   if (mine && !m.deleted) items.push({ icon: ICON.info, label: t('Info'), run: () => App.msgInfo(m) });
-  if (m.file_id && !m.deleted) items.push({ icon: ICON.download, label: t('Download'), run: () => { const a = document.createElement('a'); a.href = fileUrl(m.file_id, true); a.download = m.meta.name || ''; document.body.appendChild(a); a.click(); a.remove(); } });
+  if (m.file_id && !m.deleted) items.push({ icon: ICON.download, label: t('Download'), run: () => App.downloadFile(m) });
   items.push({ icon: ICON.trash, label: t('Delete'), danger: true, run: () => delMenu(m, canAll) });
   const m0 = sheet(`<div class="qreact">${QUICK.map((e) => `<button data-e="${e}">${e}</button>`).join('')}<button data-e="+">＋</button></div>`, items);
   setTimeout(() => $$('.qreact button').forEach((b) => (b.onclick = () => { App.closeTop(); if (b.dataset.e === '+') App.emojiPicker((e) => react(m, e)); else react(m, b.dataset.e); })), 20);
@@ -347,5 +357,5 @@ async function chatMenu(id) {
 function chatSearch(c) {
   const d = App.openDrawer(t('Search messages'), `<div class="searchrow"><input id="sq" placeholder="${t('Search…')}" autocomplete="off"></div><div class="list" id="sres"></div>`);
   const q = $('#sq', d.el); let tm; setTimeout(() => q.focus(), 80);
-  q.oninput = () => { clearTimeout(tm); tm = setTimeout(async () => { const v = q.value.trim(); if (!v) { $('#sres', d.el).innerHTML = ''; return; } try { const r = await api(`/api/chats/${c.id}/search?q=${encodeURIComponent(v)}`); const re = new RegExp('(' + v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig'); $('#sres', d.el).innerHTML = r.messages.map((m) => `<button class="row" data-m="${m.id}"><span class="row-main"><span class="row-top"><b>${esc(nameOf(m.sender_id))}</b><span class="tm">${fmtDay(m.deliver_at)}</span></span><span class="sub">${esc(previewText(m)).replace(re, '<mark>$1</mark>')}</span></span></button>`).join('') || `<div class="empty"><p>${t('No messages found')}</p></div>`; $$('[data-m]', d.el).forEach((b) => (b.onclick = () => { d.close(); setTimeout(() => App.loadUntil(c.id, +b.dataset.m), 250); })); } catch (e) { toast(e.message); } }, 300); };
+  q.oninput = () => { clearTimeout(tm); tm = setTimeout(async () => { const v = q.value.trim(); if (!v) { $('#sres', d.el).innerHTML = ''; return; } try { const r = await api(`/api/chats/${c.id}/search?q=${encodeURIComponent(v)}`); const lv = v.toLowerCase(); const seen = new Set(r.messages.map((x) => x.id)); for (const x of [...(S.msgs.get(c.id) || [])].reverse()) if (x._e2e && !x._e2e_fail && !seen.has(x.id) && (previewText(x) || '').toLowerCase().includes(lv)) { r.messages.push(x); seen.add(x.id); } r.messages.sort((a, b) => b.deliver_at - a.deliver_at); const re = new RegExp('(' + v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig'); $('#sres', d.el).innerHTML = r.messages.map((m) => `<button class="row" data-m="${m.id}"><span class="row-main"><span class="row-top"><b>${esc(nameOf(m.sender_id))}</b><span class="tm">${fmtDay(m.deliver_at)}</span></span><span class="sub">${esc(previewText(m)).replace(re, '<mark>$1</mark>')}</span></span></button>`).join('') || `<div class="empty"><p>${t('No messages found')}</p></div>`; $$('[data-m]', d.el).forEach((b) => (b.onclick = () => { d.close(); setTimeout(() => App.loadUntil(c.id, +b.dataset.m), 250); })); } catch (e) { toast(e.message); } }, 300); };
 }

@@ -279,3 +279,34 @@ test('v2: legacy no-phone login, long-poll, location/contact, invites, channels,
   assert.equal((await AD.call('DELETE', '/api/admin/users/u_admin')).status, 400, 'admin not deletable');
   ok(await AD.post('/api/admin/brand', { reset: true })); assert.equal(ok(await X.get('/api/config')).brand.app_name, 'AverChat');
 });
+
+test('2.1.0 e2e: keys, encrypted messages (no plaintext stored), edit, forward needs re-encryption, notify sealed copy, key-change notice', async () => {
+  const P = client('3.3.3.1'), Q = client('3.3.3.2');
+  const up = ok(await P.post('/api/auth/signup', { name: 'Pia', username: 'pia_e2e', phone: '9000000301', password: 'pia-pass-123' })).user;
+  const uq = ok(await Q.post('/api/auth/signup', { name: 'Qadir', username: 'qadir_e2e', phone: '9000000302', password: 'qad-pass-123' })).user;
+  const pub = (n) => Buffer.from([4, ...new Array(64).fill(n)]).toString('base64');
+  assert.equal((await P.call('PUT', '/api/me/e2e', { pub: 'nope', kid: 'abcd', backup: 'x'.repeat(30) })).status, 400, 'bad key refused');
+  ok(await P.call('PUT', '/api/me/e2e', { pub: pub(1), kid: 'a'.repeat(32), backup: '{"v":1,"locked":"' + 'x'.repeat(20) + '"}' }));
+  assert.equal(ok(await P.get('/api/me/e2e')).pub, pub(1));
+  assert.equal((await P.post('/api/me/e2e/verify', { password: 'wrong' })).status, 400); ok(await P.post('/api/me/e2e/verify', { password: 'pia-pass-123' }));
+  const d = ok(await P.post('/api/chats/direct', { user_id: uq.id })).chat;
+  let keys = ok(await P.get(`/api/chats/${d.id}/keys`)); assert.equal(keys.members.find((m) => m.id === uq.id).pub, null, 'peer without key -> chat not ready');
+  ok(await Q.call('PUT', '/api/me/e2e', { pub: pub(2), kid: 'b'.repeat(32), backup: '{"v":1,"locked":"' + 'y'.repeat(20) + '"}' }));
+  keys = ok(await Q.get(`/api/chats/${d.id}/keys`)); assert.ok(keys.members.every((m) => m.pub));
+  assert.equal((await client('3.3.3.9').get(`/api/chats/${d.id}/keys`)).status, 401);
+  const enc = (t) => JSON.stringify({ v: 1, iv: 'aXY=', ct: Buffer.from('cipher:' + t).toString('base64'), sk: pub(1), k: { [up.id]: ['c2E=', 'd2s='], [uq.id]: ['c2I=', 'd2I='] } });
+  assert.equal((await P.post(`/api/chats/${d.id}/messages`, { body: '', enc: '{"v":2}' })).status, 400, 'malformed enc refused');
+  const m = ok(await P.post(`/api/chats/${d.id}/messages`, { body: 'SHOULD-NOT-BE-STORED', enc: enc('hello') })).message;
+  assert.equal(m.body, ''); assert.ok(m.enc);
+  const row = await env.DB.prepare('SELECT body, enc FROM messages WHERE id=?').bind(m.id).first(); assert.equal(row.body, ''); assert.ok(!row.enc.includes('hello'));
+  const loc = ok(await P.post(`/api/chats/${d.id}/messages`, { type: 'location', meta: {}, enc: enc('loc') })).message; assert.deepEqual(Object.keys(loc.meta).filter((k) => ['lat', 'lng', 'label'].includes(k)), [], 'location coordinates not on server');
+  const n = ok(await Q.get('/api/notify?b=-1')); const nm = n.messages.find((x) => x.id === m.id); assert.ok(nm && nm.e2e, 'notify carries the sealed copy for this phone'); assert.deepEqual(nm.e2e.k, ['c2I=', 'd2I=']); assert.equal(nm.e2e.from, up.id); assert.equal(nm.text, 'New message');
+  ok(await P.patch(`/api/messages/${m.id}`, { enc: enc('edited') })); const r2 = await env.DB.prepare('SELECT enc, edited_at FROM messages WHERE id=?').bind(m.id).first(); assert.ok(r2.enc.includes(Buffer.from('cipher:edited').toString('base64')) && r2.edited_at);
+  const g = ok(await P.post('/api/chats/group', { name: 'E2E grp', members: [uq.id] })).chat;
+  assert.equal((await P.post(`/api/messages/${m.id}/forward`, { chat_ids: [g.id] })).status, 400, 'encrypted message cannot be forwarded without re-encryption');
+  ok(await P.post(`/api/messages/${m.id}/forward`, { chat_ids: [g.id], encs: { [g.id]: enc('fwd') } }));
+  ok(await P.post('/api/me/password', { current: 'pia-pass-123', next: 'pia-pass-456', e2e_backup: '{"v":1,"relocked":true}' }));
+  assert.equal(ok(await P.get('/api/me/e2e')).backup, '{"v":1,"relocked":true}', 'password change re-locks the key backup');
+  ok(await Q.call('PUT', '/api/me/e2e', { pub: pub(3), kid: 'c'.repeat(32), backup: '{"v":1,"locked":"' + 'z'.repeat(20) + '"}' }));
+  const msgs = ok(await P.get(`/api/chats/${d.id}/messages`)).messages; assert.ok(msgs.some((x) => x.type === 'system' && x.meta.ev === 'key_changed'), 'key change announced');
+});

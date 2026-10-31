@@ -51,12 +51,14 @@ App.chatInfo = async (id) => {
       <div class="card"><div class="sub">${esc(c.description || '')}${admin ? ` <button class="linkbtn" id="gd">${c.description ? t('Edit description') : t('Add group description')}</button>` : ''}</div></div>
       <div class="card"><button class="row" id="gmedia"><span class="ic">${ICON.image}</span><span class="row-main">${t('Media, links and docs')}</span></button>
         <button class="row" id="gdis"><span class="ic">${ICON.timer}</span><span class="row-main">${t('Disappearing messages')}<span class="sub">${dLabel(c.disappearing)}</span></span></button>
+        ${c.channel ? `<div class="row"><span class="ic">${ICON.lock}</span><span class="row-main">${t('Encryption')}<span class="sub">${t('Channel messages are not end-to-end encrypted.')}</span></span></div>` : `<button class="row" id="genc"><span class="ic">${ICON.lock}</span><span class="row-main">${t('Encryption')}<span class="sub" id="genc-s">…</span></span></button>`}
         ${admin ? `<label class="row"><span class="ic">${ICON.shield}</span><span class="row-main">${t('Only admins can send messages')}</span><input type="checkbox" id="goa" ${c.only_admins ? 'checked' : ''}></label>` : ''}</div>
       <div class="card"><div class="sect">${t('{n} members', { n: r.members.length })}</div>${admin ? `<button class="row" id="gadd"><span class="av fold">${ICON.plus}</span><span class="row-main"><b>${t('Add members')}</b></span></button><button class="row" id="ginv"><span class="av fold">${ICON.link}</span><span class="row-main"><b>${t('Invite via link')}</b><span class="sub">${t('Anyone with the link can join')}</span></span></button>` : ''}
         ${r.members.sort((a, b) => (a.user_id === S.me.id ? -1 : b.user_id === S.me.id ? 1 : (b.role === 'admin') - (a.role === 'admin'))).map((m) => { const u = S.users.get(m.user_id) || { id: m.user_id, name: '?' }; return `<button class="row" data-mem="${m.user_id}">${avatar(u, 40)}<span class="row-main"><b>${m.user_id === S.me.id ? t('You') : esc(u.name)}</b><span class="sub">${esc(u.about || '@' + (u.username || ''))}</span></span>${m.role === 'admin' ? `<span class="tag">${t('Admin')}</span>` : ''}</button>`; }).join('')}</div>
       <div class="card">${!c.left ? `<button class="row danger" id="gexit"><span class="ic">${ICON.logout}</span><span class="row-main">${t('Exit group')}</span></button>` : `<button class="row danger" id="gdel"><span class="ic">${ICON.trash}</span><span class="row-main">${t('Delete group')}</span></button>`}</div>`;
     const on = (sel, fn) => { const n = $(sel, d.body); if (n) n.onclick = fn; };
-    on('#gmedia', () => App.mediaGallery(c)); on('#gdis', () => App.disappearingMenu(c));
+    on('#gmedia', () => App.mediaGallery(c)); on('#gdis', () => App.disappearingMenu(c)); on('#genc', () => App.encInfo(c, null));
+    if (!c.channel) App.encStatus(c).then((s) => { const n = $('#genc-s', d.body); if (n) n.textContent = s; });
     on('#gexit', () => App.deleteOrExit(c).then(render)); on('#gdel', () => { App.deleteOrExit(c); d.close(); });
     on('#gn', async () => { const n = await prompt2(t('Group name'), { value: c.name, max: 60 }); if (n && n.trim()) { await patch({ name: n.trim() }); render(); } });
     on('#gd', async () => { const n = await prompt2(t('Group description'), { value: c.description || '', max: 500, multiline: true }); if (n !== null) { await patch({ description: n }); render(); } });
@@ -81,14 +83,15 @@ App.userInfo = async (uid2, chat) => {
     d.body.innerHTML = `<div class="info-top"><button class="bigav" id="uav">${avatar(u, 120)}</button><h2>${esc(u.name)}</h2><p class="muted">@${esc(u.username)}${u.phone ? ' · ' + esc(u.phone) : ''}</p><p class="muted">${esc(fmtLastSeen(u))}</p>
       <div class="actions"><button class="act" id="ua-msg">${ICON.chats}<span>${t('Message')}</span></button><button class="act" id="ua-voice">${ICON.phone}<span>${t('Voice')}</span></button><button class="act" id="ua-video">${ICON.video}<span>${t('Video')}</span></button></div></div>
       ${u.about ? `<div class="card"><div class="sect">${t('About')}</div><div class="pad0">${esc(u.about)}</div></div>` : ''}
-      <div class="card">${c ? `<button class="row" id="umedia"><span class="ic">${ICON.image}</span><span class="row-main">${t('Media, links and docs')}</span></button><button class="row" id="udis"><span class="ic">${ICON.timer}</span><span class="row-main">${t('Disappearing messages')}<span class="sub">${dLabel(c.disappearing)}</span></span></button>` : ''}
+      <div class="card">${c ? `<button class="row" id="umedia"><span class="ic">${ICON.image}</span><span class="row-main">${t('Media, links and docs')}</span></button><button class="row" id="udis"><span class="ic">${ICON.timer}</span><span class="row-main">${t('Disappearing messages')}<span class="sub">${dLabel(c.disappearing)}</span></span></button><button class="row" id="uenc"><span class="ic">${ICON.lock}</span><span class="row-main">${t('Encryption')}<span class="sub" id="uenc-s">…</span></span></button>` : ''}
         <button class="row" id="ucontact"><span class="ic">${ICON.user}</span><span class="row-main">${u.contact ? t('Remove from contacts') : t('Add to contacts')}</span></button></div>
       ${r.common_groups.length ? `<div class="card"><div class="sect">${t('{n} groups in common', { n: r.common_groups.length })}</div>${r.common_groups.map((g) => `<button class="row" data-g="${g.id}">${avatar({ id: g.id, type: 'group', name: g.name, photo: (S.chats.get(g.id) || {}).photo }, 40)}<span class="row-main"><b>${esc(g.name)}</b></span></button>`).join('')}</div>` : ''}
       <div class="card"><button class="row danger" id="ublock"><span class="ic">${ICON.block}</span><span class="row-main">${u.blocked ? t('Unblock {n}', { n: u.name }) : t('Block {n}', { n: u.name })}</span></button><button class="row danger" id="ureport"><span class="ic">${ICON.flag}</span><span class="row-main">${t('Report {n}', { n: u.name })}</span></button></div>`;
     const on = (sel, fn) => { const n = $(sel, d.body); if (n) n.onclick = fn; };
     on('#ua-msg', () => App.openDirect(u.id)); on('#ua-voice', () => App.startCall(u.id, 'voice')); on('#ua-video', () => App.startCall(u.id, 'video'));
     on('#uav', () => u.photo && App.viewImage(fileUrl(u.photo), u.name));
-    on('#umedia', () => App.mediaGallery(c)); on('#udis', () => App.disappearingMenu(c));
+    on('#umedia', () => App.mediaGallery(c)); on('#udis', () => App.disappearingMenu(c)); on('#uenc', () => App.encInfo(c, u));
+    if (c) App.encStatus(c).then((s) => { const n = $('#uenc-s', d.body); if (n) n.textContent = s; });
     on('#ublock', async () => { await App.toggleBlock(S.users.get(u.id)); u.blocked = S.users.get(u.id).blocked; render(); });
     on('#ureport', () => App.report(u.id, c && c.id));
     on('#ucontact', async () => { try { if (u.contact) await api(`/api/contacts/${u.id}`, { method: 'DELETE' }); else await api('/api/contacts', { body: { user_id: u.id } }); u.contact = !u.contact; render(); } catch (e) { toast(e.message); } });
@@ -140,7 +143,7 @@ App.mediaGallery = async (c) => {
   const show = (k) => {
     $$('.seg button', d.body).forEach((b) => b.classList.toggle('on', b.dataset.k === k)); const g = $('#gal', d.body);
     if (k === 'media') { const list = r.messages.filter((m) => ['image', 'video'].includes(m.type)); g.innerHTML = list.length ? `<div class="grid">${list.map((m) => `<button class="gi" data-m="${m.id}">${m.type === 'image' ? `<img src="${fileUrl(m.file_id)}" loading="lazy">` : `${m.meta.thumb ? `<img src="${fileUrl(m.meta.thumb)}" loading="lazy">` : ''}<span class="vbadge">${ICON.video}</span>`}</button>`).join('')}</div>` : `<div class="empty"><p>${t('No media')}</p></div>`; $$('[data-m]', g).forEach((b) => (b.onclick = () => { const m = list.find((x) => String(x.id) === b.dataset.m); App.openViewer(m); })); }
-    if (k === 'docs') { const list = r.messages.filter((m) => ['file', 'audio', 'voice'].includes(m.type)); g.innerHTML = `<div class="list">${list.map((m) => `<a class="row" href="${fileUrl(m.file_id, true)}" download><span class="ic">${ICON.doc}</span><span class="row-main"><b>${esc(m.meta.name || t('Voice message'))}</b><span class="sub">${fmtSize(m.meta.size)} · ${fmtDay(m.deliver_at)}</span></span><span class="ic">${ICON.download}</span></a>`).join('') || `<div class="empty"><p>${t('No documents')}</p></div>`}</div>`; }
+    if (k === 'docs') { const list = r.messages.filter((m) => ['file', 'audio', 'voice'].includes(m.type)); g.innerHTML = `<div class="list">${list.map((m) => `<a class="row" href="${fileUrl(m.file_id, true)}" download data-dl="${m.id}"><span class="ic">${ICON.doc}</span><span class="row-main"><b>${esc(m.meta.name || t('Voice message'))}</b><span class="sub">${fmtSize(m.meta.size)} · ${fmtDay(m.deliver_at)}</span></span><span class="ic">${ICON.download}</span></a>`).join('') || `<div class="empty"><p>${t('No documents')}</p></div>`}</div>`; $$('[data-dl]', g).forEach((a) => (a.onclick = (e) => { e.preventDefault(); const m = list.find((x) => String(x.id) === a.dataset.dl); if (m) App.downloadFile(m); })); }
     if (k === 'links') { g.innerHTML = `<div class="list">${links.map((m) => (m.body.match(/https?:\/\/[^\s]+/g) || []).map((u) => `<a class="row" href="${esc(u)}" target="_blank" rel="noopener"><span class="ic">${ICON.globe}</span><span class="row-main"><span class="sub">${esc(u)}</span></span></a>`).join('')).join('') || `<div class="empty"><p>${t('No links in loaded messages')}</p></div>`}</div>`; }
   };
   $$('.seg button', d.body).forEach((b) => (b.onclick = () => show(b.dataset.k))); show('media');
@@ -149,4 +152,23 @@ App.starred = async () => {
   const d = App.openDrawer(t('Starred messages'), `<div class="loading">${t('Loading…')}</div>`);
   try { const r = await api('/api/starred'); d.body.innerHTML = `<div class="list">${r.messages.map((m) => { const c = S.chats.get(m.chat_id); return `<button class="row" data-m="${m.id}" data-c="${m.chat_id}"><span class="row-main"><span class="row-top"><b>${esc(nameOf(m.sender_id))}${c ? ' → ' + esc(chatTitle(c)) : ''}</b><span class="tm">${fmtDay(m.deliver_at)}</span></span><span class="sub">${esc(previewText(m))}</span></span></button>`; }).join('') || `<div class="empty"><p>${ICON.star}<br>${t('Tap and hold any message, then Star it to find it here.')}</p></div>`}</div>`;
     $$('[data-m]', d.body).forEach((b) => (b.onclick = async () => { App.closeAllDrawers(); await App.openChat(b.dataset.c); setTimeout(() => App.loadUntil(b.dataset.c, +b.dataset.m), 300); })); } catch (e) { toast(e.message); }
+};
+
+// ---------- end-to-end encryption: status line, safety number ----------
+App.encStatus = async (c) => {
+  const E = App.E2E; if (!E) return '';
+  if (c.channel) return t('Channel messages are not end-to-end encrypted.');
+  if (!E.ready) return t('Locked on this device: tap to unlock');
+  if (await E.readyFor(c.id)) return c.type === 'direct' ? t('Messages are end-to-end encrypted. Tap to verify.') : t('Messages are end-to-end encrypted.');
+  const miss = (await E.missing(c.id)) || []; return miss.length ? t('Not yet: {n} needs to open the updated AverChat', { n: miss.slice(0, 3).join(', ') }) : t('Not end-to-end encrypted yet.');
+};
+App.encInfo = async (c, u) => {
+  const E = App.E2E; if (!E) return; if (!E.ready) return E.ask();
+  let code = '';
+  if (c.type === 'direct') { try { const d = await E.chatKeys(c.id, true); const peer = d.members.find((m) => m.id !== S.me.id); if (peer && peer.pub) code = await E.safetyNumber(E.key.pub, peer.pub); } catch {} }
+  const ready = await E.readyFor(c.id);
+  openModal(`<div class="dlg"><h3>🔒 ${t('End-to-end encryption')}</h3>
+    <p class="fine">${ready ? t('Messages, photos, videos, voice notes and files in this chat are encrypted on your phone and can only be opened on the phones of the people in this chat. The AverChat server and admin cannot read them. Calls are encrypted directly between the two phones.') : t('This chat is not end-to-end encrypted yet, because someone in it has not opened the updated AverChat. Older messages from before the update are not end-to-end encrypted either.')}</p>
+    ${code ? `<div class="sect">${t('Security code with {n}', { n: esc((u && u.name) || '') })}</div><div style="font:600 17px/1.7 ui-monospace,monospace;letter-spacing:1px;text-align:center;padding:8px 0">${code}</div><p class="fine">${t('Compare this code with the one on your contact’s phone (in person or on a call). If they match, nobody is in the middle.')}</p>` : ''}
+    <div class="dlg-btns"><button class="btn" data-close>${t('OK')}</button></div></div>`);
 };

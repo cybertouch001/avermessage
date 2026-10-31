@@ -88,15 +88,17 @@ function voiceHtml(m, src) {
 let currentAudio = null;
 App.bindMedia = (n, get) => {
   const v = n.querySelector('[data-view]'); if (v) v.onclick = () => { const m = get(); if (m && !m.pending) App.openViewer(m); };
+  const dl = n.querySelector('.docmsg .dl'); if (dl) dl.onclick = (e) => { e.preventDefault(); const m = get(); if (m) App.downloadFile(m); };
   const vc = n.querySelector('.voice'); if (!vc) return;
   const btn = vc.querySelector('.vplay'), wave = vc.querySelector('.vwave'), prog = vc.querySelector('.vprog'), tm = vc.querySelector('.vtime'), sp = vc.querySelector('.vspeed');
   let a = null; const dur0 = +vc.dataset.dur || 0;
-  const ensure = () => { if (a) return a; a = new Audio(vc.dataset.src); a.preload = 'auto'; vc.appendChild(a); a.style.display = 'none';
+  const encId = (vc.dataset.src || '').includes('#avmenc=') ? vc.dataset.src.split('#avmenc=')[1] : null; // end-to-end encrypted: decrypt before playing
+  const ensure = () => { if (a) return a; a = new Audio(encId ? undefined : vc.dataset.src); a.preload = 'auto'; vc.appendChild(a); a.style.display = 'none';
     a.ontimeupdate = () => { const d = isFinite(a.duration) && a.duration > 0 ? a.duration : dur0; prog.style.width = d ? Math.min(100, (a.currentTime / d) * 100) + '%' : '0'; tm.textContent = fmtDur(a.currentTime); };
     a.onended = () => { btn.innerHTML = ICON.play; prog.style.width = '0'; tm.textContent = fmtDur(dur0); vc.classList.remove('playing'); };
     a.onpause = () => { btn.innerHTML = ICON.play; vc.classList.remove('playing'); }; a.onplay = () => { btn.innerHTML = ICON.pause; vc.classList.add('playing'); };
     return a; };
-  btn.onclick = () => { const au = ensure(); if (au.paused) { if (currentAudio && currentAudio !== au) currentAudio.pause(); currentAudio = au; au.playbackRate = parseFloat(sp.textContent) || 1; au.play().catch((e) => toast(t('Can’t play this audio here'))); } else au.pause(); };
+  btn.onclick = async () => { const au = ensure(); if (encId && !au.src) { try { au.src = await App.E2E.blobUrl(encId); } catch { return toast(t('Couldn’t open this encrypted file')); } } if (au.paused) { if (currentAudio && currentAudio !== au) currentAudio.pause(); currentAudio = au; au.playbackRate = parseFloat(sp.textContent) || 1; au.play().catch((e) => toast(t('Can’t play this audio here'))); } else au.pause(); };
   sp.onclick = () => { const r = { '1×': '1.5×', '1.5×': '2×', '2×': '1×' }[sp.textContent] || '1×'; sp.textContent = r; if (a) a.playbackRate = parseFloat(r); };
   wave.onclick = (e) => { const au = ensure(); const rect = wave.getBoundingClientRect(); const d = isFinite(au.duration) && au.duration > 0 ? au.duration : dur0; if (d) au.currentTime = ((e.clientX - rect.left) / rect.width) * d; };
 };
@@ -107,6 +109,7 @@ App.openViewer = (m) => {
   const body = m.type === 'video' ? `<video src="${src}" controls autoplay playsinline></video>` : `<img src="${src}" alt="">`;
   const mm = openModal(`<div class="viewer"><header><button class="ib" data-close>${ICON.back}</button><span class="vw-t"><b>${esc(nameOf(m.sender_id))}</b><span class="sub">${new Date(m.deliver_at).toLocaleString()}</span></span><button class="ib" id="vw-fwd">${ICON.fwd}</button><a class="ib" href="${fileUrl(m.file_id, true)}" download="${esc(m.meta.name || '')}">${ICON.download}</a></header><div class="vw-body">${body}</div>${m.body ? `<div class="vw-cap">${esc(m.body)}</div>` : ''}</div>`, { cls: 'full' });
   const f = mm.el.querySelector('#vw-fwd'); f.onclick = () => { mm.close(); setTimeout(() => App.forward(m), 50); };
+  const vd = mm.el.querySelector('header a.ib[download]'); if (vd) vd.onclick = (e) => { e.preventDefault(); App.downloadFile(m); };
 };
 App.viewImage = (src, title) => openModal(`<div class="viewer"><header><button class="ib" data-close>${ICON.back}</button><span class="vw-t"><b>${esc(title || '')}</b></span></header><div class="vw-body"><img src="${src}" alt=""></div></div>`, { cls: 'full' });
 

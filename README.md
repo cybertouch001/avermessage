@@ -12,6 +12,14 @@ location and contact sharing, replies, reactions, polls, status, 1:1 voice/video
     A quiet "AverChat connected" notification shows while it runs (its channel can be turned off in phone settings).
   * A one-time setup screen (`SetupActivity`, Hinglish) asks for notification permission, unrestricted battery, and autostart on Vivo / Xiaomi / Oppo-type phones.
   * The old WorkManager check (about every 15 minutes) stays as a fallback.
+  * 2.1.0: shows the real text of end-to-end encrypted messages in notifications (`AvmE2E`: key kept encrypted under an Android Keystore key), and saves decrypted files to Downloads/AverChat.
+* End-to-end encryption (2.1.0, `site/js/e2e.js`): 1:1 and group messages, captions, photos, videos, voice notes, files, locations, contacts and poll texts are
+  encrypted on the sender's device with standard WebCrypto: an ECDH P-256 identity key per user, a fresh AES-256-GCM key per message, sealed for each
+  member with HKDF-SHA256 over ECDH(sender, member). The server stores only ciphertext (`messages.enc`), public keys, and a key backup locked with the
+  user's password (PBKDF2-SHA256, 310k rounds), so a reinstall or new phone restores the key at login. A chat is encrypted when every member has a key;
+  otherwise it falls back to normal messages, marked 🔓. Security codes (chat info) let two people verify keys; a key change is announced in the chat.
+  Not end-to-end encrypted: channels, status updates, profile data, messages sent before 2.1.0, and metadata (who talks to whom, when, sizes, reactions).
+  An admin password reset means that user's earlier encrypted messages can't be opened on a new/reinstalled phone. Test: `test/e2e_crypto.py`.
 * Admin desktop app: `admin-app/` — Electron wrapper around `/admin` (Windows portable .exe via electron-builder).
 * Brand assets: `brand/`. Tests: `test/` (`node test/api.test.mjs` against a local dev server, `tools/dev-server.mjs`).
 

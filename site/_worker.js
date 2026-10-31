@@ -2,9 +2,11 @@
 // Realtime: clients long-poll /api/sync (a change counter wakes waiting requests; no shared WebSocket rooms here). Calls: WebRTC, signalling via /api/calls/*.
 // Security: PBKDF2-SHA256 password hashes, HttpOnly session cookies (token stored hashed), login lockout,
 // a custom header on every write (CSRF), every API checks the session, files only for chat members.
-// NOT end-to-end encrypted: data is encrypted in transit (HTTPS) and stored on the server.
+// 2.1.0: end-to-end encryption for 1:1 and group messages. Message content (text, captions, file names, locations, contacts, poll texts)
+// and file bytes are encrypted on the sender's device (ECDH P-256 + HKDF-SHA256 + AES-256-GCM); this server stores only ciphertext ('enc')
+// and users' public keys + password-encrypted key backups it cannot open. Channels and status updates are not end-to-end encrypted.
 
-const VERSION = '2.0.1';
+const VERSION = '2.1.0';
 const PBKDF2_ITER = 100000;
 const MAX_FILE = 50 * 1024 * 1024;           // 50 MB per file
 const EDIT_WINDOW = 15 * 60 * 1000;          // edit own message within 15 min
@@ -58,6 +60,11 @@ const SCHEMA = [
 // v2 migrations: added columns (each ALTER runs once; a duplicate-column error means it already ran).
 const MIGRATIONS = [
   `ALTER TABLE users ADD COLUMN email TEXT`,
+  `ALTER TABLE messages ADD COLUMN enc TEXT`,
+  `ALTER TABLE users ADD COLUMN e2e_pub TEXT`,
+  `ALTER TABLE users ADD COLUMN e2e_kid TEXT`,
+  `ALTER TABLE users ADD COLUMN e2e_backup TEXT`,
+  `ALTER TABLE users ADD COLUMN e2e_at INTEGER`,
   `ALTER TABLE chats ADD COLUMN invite_code TEXT`,
   `ALTER TABLE chats ADD COLUMN channel INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE chats ADD COLUMN public INTEGER NOT NULL DEFAULT 0`,
@@ -72,9 +79,9 @@ async function ensureSchema(env) {
   if (schemaReady) return;
   await env.DB.batch(SCHEMA.map((s) => env.DB.prepare(s)));
   const sv = await env.DB.prepare(`SELECT v FROM kv WHERE k='schema_v'`).first();
-  if (!sv || +J(sv.v, 0) < 2) {
+  if (!sv || +J(sv.v, 0) < 3) {
     for (const q of MIGRATIONS) { try { await env.DB.prepare(q).run(); } catch (e) { if (!/duplicate column|already exists/i.test(String(e && e.message))) throw e; } }
-    await env.DB.prepare(`INSERT INTO kv(k,v) VALUES('schema_v','2') ON CONFLICT(k) DO UPDATE SET v='2'`).run();
+    await env.DB.prepare(`INSERT INTO kv(k,v) VALUES('schema_v','3') ON CONFLICT(k) DO UPDATE SET v='3'`).run();
   }
   schemaReady = true;
 }
@@ -150,6 +157,7 @@ function pubUser(u, viewer, rel = {}) {
   const self = viewer && viewer.id === u.id;
   const can = (p) => self || (!rel.blockedByU && (p === 'all' || (p === 'contacts' && rel.isContact)));
   const o = { id: u.id, username: u.username, name: u.deleted ? 'Deleted account' : u.name };
+  if (u.e2e_pub && !u.deleted) { o.e2e_pub = u.e2e_pub; o.e2e_kid = u.e2e_kid; }
   if (u.role === 'admin') o.role = 'admin';
   o.photo = can(u.p_photo) && !u.deleted ? u.photo || null : null;
   o.about = can(u.p_about) && !u.deleted ? u.about : null;
@@ -182,7 +190,7 @@ async function usersPublic(env, viewer, ids) {
   return o;
 }
 
-const MSG_COLS = `m.*, r.sender_id AS r_sender, r.type AS r_type, substr(r.body,1,160) AS r_body, r.deleted AS r_deleted, r.meta AS r_meta`;
+const MSG_COLS = `m.*, r.sender_id AS r_sender, r.type AS r_type, substr(r.body,1,160) AS r_body, r.deleted AS r_deleted, r.meta AS r_meta, r.enc AS r_enc`;
 async function enrichMessages(env, me, rows) {
   if (!rows.length) return [];
   const ids = rows.map((r) => r.id); const q = ids.map(() => '?').join(',');
@@ -196,17 +204,26 @@ async function enrichMessages(env, me, rows) {
   vo.results.forEach((r) => (votes[r.message_id] ||= []).push({ user_id: r.user_id, opt: r.opt }));
   return rows.map((m) => serMsg(m, reac[m.id] || [], votes[m.id] || [], stars.has(m.id)));
 }
+// an end-to-end encrypted payload as the sender's app made it: {v:1, iv, ct, sk (sender public key), k: {userId: [salt, wrappedKey]}}
+function parseEnc(s) {
+  if (typeof s !== 'string' || s.length > 400000) return null;
+  const o = J(s, null);
+  if (!o || o.v !== 1 || typeof o.iv !== 'string' || typeof o.ct !== 'string' || typeof o.sk !== 'string' || !o.k || typeof o.k !== 'object' || Array.isArray(o.k)) return null;
+  return s;
+}
 const pickMeta = (x) => ({ name: x.name, duration: x.duration, question: x.question });
 function serMsg(m, reactions = [], votes = [], starred = false) {
   const o = { id: m.id, chat_id: m.chat_id, sender_id: m.sender_id, type: m.type, body: m.deleted ? '' : m.body, file_id: m.deleted ? null : m.file_id, meta: m.deleted ? J(m.meta, {}) : J(m.meta, {}), reply_to: m.reply_to || null, forwarded: !!m.forwarded, edited_at: m.edited_at || null, deleted: !!m.deleted, created_at: m.created_at, deliver_at: m.deliver_at, expires_at: m.expires_at || null, ver: m.ver, client_id: m.client_id || null, reactions: m.deleted ? [] : reactions, starred };
+  if (m.enc && !m.deleted) o.enc = m.enc; // end-to-end encrypted content: only chat members' devices can open it
   if (m.reply_to && m.r_type) o.reply = { id: m.reply_to, sender_id: m.r_sender, type: m.r_type, body: m.r_deleted ? '' : m.r_body, deleted: !!m.r_deleted, meta: m.r_deleted ? {} : pickMeta(J(m.r_meta, {})) };
+  if (o.reply && m.r_enc && !m.r_deleted) o.reply.enc = m.r_enc;
   if (m.type === 'poll' && !m.deleted) o.votes = votes;
   return o;
 }
 
 // ---------- membership ----------
 async function member(env, chatId, userId, mustBeActive = true) {
-  const r = await env.DB.prepare('SELECT m.*, c.type AS c_type, c.disappearing AS c_disappearing, c.only_admins AS c_only_admins, c.name AS c_name FROM members m JOIN chats c ON c.id=m.chat_id WHERE m.chat_id=? AND m.user_id=?').bind(chatId, userId).first();
+  const r = await env.DB.prepare('SELECT m.*, c.type AS c_type, c.disappearing AS c_disappearing, c.only_admins AS c_only_admins, c.name AS c_name, c.channel AS c_channel FROM members m JOIN chats c ON c.id=m.chat_id WHERE m.chat_id=? AND m.user_id=?').bind(chatId, userId).first();
   if (!r) err(404, 'Chat not found', 'not_found');
   if (mustBeActive && r.left_at) err(403, 'You are no longer a member of this group', 'left');
   return r;
@@ -317,7 +334,7 @@ async function sync(env, me, url) {
 async function sweep(env, now) {
   await setSetting(env, 'sweep', now);
   const exp = (await env.DB.prepare('SELECT id, file_id FROM messages WHERE expires_at IS NOT NULL AND expires_at<? AND deleted=0 LIMIT 500').bind(now - 60000).all()).results;
-  for (const m of exp) { await env.DB.prepare(`UPDATE messages SET deleted=1, body='', meta='{}', file_id=NULL, ver=? WHERE id=?`).bind(now, m.id).run(); if (m.file_id) await dropFile(env, m.file_id); }
+  for (const m of exp) { await env.DB.prepare(`UPDATE messages SET deleted=1, body='', enc=NULL, meta='{}', file_id=NULL, ver=? WHERE id=?`).bind(now, m.id).run(); if (m.file_id) await dropFile(env, m.file_id); }
   await env.DB.batch([
     env.DB.prepare('DELETE FROM signals WHERE created_at<?').bind(now - 3600000),
     env.DB.prepare('DELETE FROM typing WHERE until<?').bind(now - 60000),
@@ -470,14 +487,19 @@ async function api(req, env, url) {
     const now = Date.now();
     const since = Math.max(+url.searchParams.get('since') || 0, now - 2 * 86400000);
     const hidePreview = J(me.settings, {}).preview === false;
-    const rows = (await env.DB.prepare(`SELECT m.id, m.chat_id, m.sender_id, m.type, substr(m.body,1,120) AS body, m.meta, m.deliver_at, c.type AS c_type, c.name AS c_name, u.name AS s_name, cm.locked AS c_locked
+    const rows = (await env.DB.prepare(`SELECT m.id, m.chat_id, m.sender_id, m.type, substr(m.body,1,120) AS body, m.meta, m.deliver_at, m.enc, c.type AS c_type, c.name AS c_name, u.name AS s_name, cm.locked AS c_locked
       FROM messages m JOIN members cm ON cm.chat_id=m.chat_id AND cm.user_id=? AND cm.left_at IS NULL JOIN chats c ON c.id=m.chat_id JOIN users u ON u.id=m.sender_id
       WHERE m.deliver_at>? AND m.deliver_at<=? AND m.sender_id<>? AND m.deleted=0 AND m.type NOT IN ('system') AND cm.muted_until<? AND m.deliver_at>cm.seen_upto AND m.deliver_at>=cm.joined_at
       AND m.sender_id NOT IN (SELECT blocked_id FROM blocks WHERE user_id=?) ORDER BY m.deliver_at DESC LIMIT 30`).bind(me.id, since, now, me.id, now, me.id).all()).results;
     const ring = (await env.DB.prepare(`SELECT c.id, c.kind, u.name AS caller FROM calls c JOIN users u ON u.id=c.caller_id WHERE c.callee_id=? AND c.status='ringing' AND c.created_at>?`).bind(me.id, now - RING_MS).all()).results;
     const label = (r) => { const mm = J(r.meta, {}); return r.type === 'text' ? r.body : r.type === 'image' ? '📷 Photo' : r.type === 'video' ? '🎥 Video' : r.type === 'voice' ? '🎤 Voice message' : r.type === 'audio' ? '🎵 Audio' : r.type === 'file' ? '📄 ' + (mm.name || 'Document') : r.type === 'poll' ? '📊 ' + (mm.question || 'Poll') : r.type === 'location' ? '📍 Location' : r.type === 'contact' ? '👤 Contact' : r.type === 'call' ? '📞 Call' : 'New message'; };
     const brand = await getBrand(env);
-    return json({ now, b: nbv, app_name: brand.app_name, screenshots: brand.screenshots !== false, messages: rows.map((r) => ({ id: r.id, chat_id: r.chat_id, title: r.c_type === 'group' ? r.c_name : r.s_name, sender: r.s_name, group: r.c_type === 'group', text: hidePreview || r.c_locked ? 'New message' : label(r), at: r.deliver_at })), calls: ring });
+    return json({ now, b: nbv, app_name: brand.app_name, screenshots: brand.screenshots !== false, messages: rows.map((r) => {
+      const o = { id: r.id, chat_id: r.chat_id, title: r.c_type === 'group' ? r.c_name : r.s_name, sender: r.s_name, group: r.c_type === 'group', type: r.type, text: hidePreview || r.c_locked ? 'New message' : r.enc ? (r.type === 'text' ? 'New message' : label(r)) : label(r), at: r.deliver_at };
+      // encrypted: hand the phone only its own sealed copy so the app can show the preview after opening it on the device
+      if (r.enc && !hidePreview && !r.c_locked) { const e = J(r.enc, null); if (e && e.k && e.k[me.id] && e.ct.length < 24000) o.e2e = { iv: e.iv, ct: e.ct, sk: e.sk, k: e.k[me.id], from: r.sender_id }; }
+      return o;
+    }), calls: ring });
   }
   if (p === '/api/sync' && m === 'GET') return json(await sync(env, me, url));
   if (p === '/api/me' && m === 'GET') return json({ user: pubUser(me, me), ice: await iceServers(env), config: await getSetting(env, 'public', {}) });
@@ -501,8 +523,35 @@ async function api(req, env, url) {
     if (String(b.next || '').length < 8) err(400, 'New password must be at least 8 characters');
     const n = await hashPassword(String(b.next));
     await env.DB.prepare('UPDATE users SET pw_hash=?, pw_salt=?, pw_iter=? WHERE id=?').bind(n.hash, n.salt, n.iterations, me.id).run();
+    // the app re-locks the encryption-key backup with the new password (the server can't: it never sees the key)
+    if (typeof b.e2e_backup === 'string' && b.e2e_backup.length < 20000 && me.e2e_pub) await env.DB.prepare('UPDATE users SET e2e_backup=? WHERE id=?').bind(b.e2e_backup, me.id).run();
     await env.DB.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash<>?').bind(me.id, me.token_hash).run();
     return json({ ok: true });
+  }
+  // ---- end-to-end encryption keys (the private key never reaches the server; only a backup locked with the user's password) ----
+  if (p === '/api/me/e2e' && m === 'GET') return json({ pub: me.e2e_pub || null, kid: me.e2e_kid || null, backup: me.e2e_backup || null, at: me.e2e_at || null });
+  if (p === '/api/me/e2e/verify' && m === 'POST') {
+    const b = await body(); if (!(await rateHit(env, 'e2ev:' + me.id, 20, 3600000))) err(429, 'Too many tries, wait a while');
+    const h = await hashPassword(String(b.password || ''), me.pw_salt, me.pw_iter); if (!safeEq(h.hash, me.pw_hash)) err(400, 'Wrong password', 'bad_password');
+    return json({ ok: true });
+  }
+  if (p === '/api/me/e2e' && m === 'PUT') {
+    const b = await body();
+    const pub = String(b.pub || ''); const kid = String(b.kid || ''); const backup = String(b.backup || '');
+    if (!/^[A-Za-z0-9+/]{86}[A-Za-z0-9+/=]{2}$/.test(pub) || !/^[0-9a-f]{16,64}$/.test(kid) || backup.length < 20 || backup.length > 20000) err(400, 'Bad key', 'bad_key');
+    const changed = me.e2e_pub && me.e2e_pub !== pub;
+    await env.DB.prepare('UPDATE users SET e2e_pub=?, e2e_kid=?, e2e_backup=?, e2e_at=? WHERE id=?').bind(pub, kid, backup, now, me.id).run();
+    if (changed) { // tell the people this user chats with that their security code changed
+      const chats = (await env.DB.prepare(`SELECT m.chat_id FROM members m JOIN chats c ON c.id=m.chat_id WHERE m.user_id=? AND m.left_at IS NULL AND c.channel=0 AND c.type IN ('direct','group')`).bind(me.id).all()).results;
+      for (const c of chats.slice(0, 300)) { await sysMsg(env, c.chat_id, me.id, { ev: 'key_changed', actor: me.name }); await bumpChat(env, c.chat_id, now); }
+      await bumpAll(env);
+    }
+    return json({ ok: true, changed: !!changed });
+  }
+  if ((mt = p.match(/^\/api\/chats\/([\w-]+)\/keys$/)) && m === 'GET') {
+    const mem = await member(env, mt[1], me.id);
+    const rows = (await env.DB.prepare(`SELECT u.id, u.name, u.e2e_pub, u.e2e_kid FROM members m JOIN users u ON u.id=m.user_id WHERE m.chat_id=? AND m.left_at IS NULL AND u.deleted=0`).bind(mt[1]).all()).results;
+    return json({ channel: !!mem.c_channel, type: mem.c_type, members: rows.map((r) => ({ id: r.id, name: r.name, pub: r.e2e_pub || null, kid: r.e2e_kid || null })) });
   }
   if (p === '/api/me/sessions' && m === 'GET') { const rows = (await env.DB.prepare('SELECT created_at, last_used, ua, token_hash FROM sessions WHERE user_id=? ORDER BY last_used DESC').bind(me.id).all()).results; return json({ sessions: rows.map((r) => ({ created_at: r.created_at, last_used: r.last_used, ua: r.ua, current: r.token_hash === me.token_hash })) }); }
   if (p === '/api/me/logout-all' && m === 'POST') { await env.DB.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash<>?').bind(me.id, me.token_hash).run(); return json({ ok: true }); }
@@ -770,8 +819,13 @@ async function api2(req, env, url, me, body) {
     if (action === '' && m === 'PATCH') {
       const b = await body(); if (msg.sender_id !== me.id || msg.type !== 'text' || msg.deleted) err(403, 'You can only edit your own text messages', 'not_yours');
       if (now - msg.deliver_at > EDIT_WINDOW) err(400, 'Messages can be edited for 15 minutes after sending', 'edit_window');
+      if (b.enc != null) {
+        const es = parseEnc(b.enc); if (!es) err(400, 'Bad encrypted message', 'bad_enc');
+        await env.DB.prepare(`UPDATE messages SET body='', enc=?, edited_at=?, ver=MAX(?, deliver_at) WHERE id=?`).bind(es, now, now, id).run();
+        return done();
+      }
       const t = clamp(b.body, 10000); if (!t.trim()) err(400, 'Empty message');
-      await env.DB.prepare('UPDATE messages SET body=?, edited_at=?, ver=MAX(?, deliver_at) WHERE id=?').bind(t, now, now, id).run();
+      await env.DB.prepare('UPDATE messages SET body=?, enc=NULL, edited_at=?, ver=MAX(?, deliver_at) WHERE id=?').bind(t, now, now, id).run();
       return done();
     }
     if (action === '/delete' && m === 'POST') {
@@ -781,7 +835,7 @@ async function api2(req, env, url, me, body) {
         if (msg.sender_id !== me.id && !isAdmin) err(403, 'You can only delete your own messages for everyone', 'not_yours');
         if (msg.sender_id === me.id && !isAdmin && msg.deliver_at <= now && now - msg.deliver_at > DELETE_ALL_WINDOW) err(400, 'Too old to delete for everyone (24 h limit)', 'delete_window');
         if (msg.type === 'system' || msg.type === 'call') err(400, 'This can’t be deleted for everyone');
-        await env.DB.prepare(`UPDATE messages SET deleted=1, body='', meta=?, file_id=NULL, ver=MAX(?, deliver_at) WHERE id=?`).bind(JSON.stringify(msg.sender_id !== me.id ? { by_admin: me.name } : {}), now, id).run();
+        await env.DB.prepare(`UPDATE messages SET deleted=1, body='', enc=NULL, meta=?, file_id=NULL, ver=MAX(?, deliver_at) WHERE id=?`).bind(JSON.stringify(msg.sender_id !== me.id ? { by_admin: me.name } : {}), now, id).run();
         await env.DB.prepare('DELETE FROM reactions WHERE message_id=?').bind(id).run();
         if (msg.file_id) await dropFile(env, msg.file_id);
         const th = J(msg.meta, {}).thumb; if (th) await dropFile(env, th);
@@ -836,7 +890,10 @@ async function api2(req, env, url, me, body) {
           if (meta.thumb) { const tf = await env.DB.prepare('SELECT * FROM files WHERE id=?').bind(meta.thumb).first(); if (tf) { const nt = 'f_' + rid(12); await env.DB.prepare('INSERT INTO files(id,owner_id,scope,r2_key,name,mime,size,created_at) VALUES(?,?,?,?,?,?,?,?)').bind(nt, me.id, 'chat:' + t, tf.r2_key, tf.name, tf.mime, tf.size, now).run(); meta.thumb = nt; } else delete meta.thumb; }
         }
         if (msg.type === 'poll' && tm.c_type !== 'group') continue;
-        out.push(await createMessage(env, me, tm, t, { type: msg.type, body: msg.body, meta, file_id: fileId }, { forwarded: 1, rawMeta: true }));
+        // an encrypted message is re-encrypted by the forwarding app for the new chat (b.encs[chatId]); without that it can't be forwarded
+        const fenc = b.encs && typeof b.encs === 'object' ? b.encs[t] : undefined;
+        if (msg.enc && !fenc) err(400, 'Please update AverChat to forward encrypted messages', 'need_enc');
+        out.push(await createMessage(env, me, tm, t, fenc ? { type: msg.type, body: '', meta, file_id: fileId, enc: fenc } : { type: msg.type, body: msg.body, meta, file_id: fileId }, { forwarded: 1, rawMeta: true }));
       }
       return json({ messages: out });
     }
@@ -976,13 +1033,15 @@ async function api2(req, env, url, me, body) {
         env.DB.prepare('SELECT COUNT(*) AS n FROM calls'), env.DB.prepare('SELECT COUNT(*) AS n FROM reports WHERE resolved=0'), env.DB.prepare('SELECT COUNT(*) AS n FROM statuses WHERE expires_at>?').bind(now),
       ]);
       const on = await env.DB.prepare('SELECT COUNT(*) AS n FROM users WHERE last_seen>? AND deleted=0').bind(now - ONLINE_MS).first();
-      return json({ online_now: on.n, users: u.results[0].n, new_users_24h: u24.results[0].n, active_24h: act.results[0].n, messages: msgs.results[0].n, messages_24h: m24.results[0].n, direct_chats: ch.results[0].n, groups: gr.results[0].n, files: fl.results[0].n, file_bytes: fl.results[0].bytes, calls: cl.results[0].n, open_reports: rp.results[0].n, live_statuses: st.results[0].n });
+      const e2e = await env.DB.prepare('SELECT COUNT(*) AS n FROM messages WHERE enc IS NOT NULL').first();
+      const e2eu = await env.DB.prepare('SELECT COUNT(*) AS n FROM users WHERE e2e_pub IS NOT NULL AND deleted=0').first();
+      return json({ encrypted_messages: e2e.n, users_with_encryption: e2eu.n, online_now: on.n, users: u.results[0].n, new_users_24h: u24.results[0].n, active_24h: act.results[0].n, messages: msgs.results[0].n, messages_24h: m24.results[0].n, direct_chats: ch.results[0].n, groups: gr.results[0].n, files: fl.results[0].n, file_bytes: fl.results[0].bytes, calls: cl.results[0].n, open_reports: rp.results[0].n, live_statuses: st.results[0].n });
     }
     if (p === '/api/admin/users' && m === 'GET') {
       // Passwords are never readable (stored only as salted PBKDF2 hashes); the admin can set a new one instead.
       const q = clamp(url.searchParams.get('q'), 60).trim().toLowerCase(); const lk = '%' + likeEsc(q) + '%';
       const onlyOnline = url.searchParams.get('online') === '1';
-      const rows = (await env.DB.prepare(`SELECT id, username, name, phone, email, role, banned, deleted, created_at, last_seen, (SELECT COUNT(*) FROM messages WHERE sender_id=users.id) AS msgs, (SELECT COUNT(*) FROM reports WHERE target_id=users.id) AS reports FROM users WHERE deleted=0 AND (?='' OR username LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\' OR lower(email) LIKE ? ESCAPE '\\') AND (?=0 OR last_seen>?) ORDER BY ${onlyOnline ? 'last_seen' : 'created_at'} DESC LIMIT 2000`).bind(q, lk, lk, lk, lk, onlyOnline ? 1 : 0, now - 120000).all()).results;
+      const rows = (await env.DB.prepare(`SELECT id, username, name, phone, email, role, banned, deleted, created_at, last_seen, (e2e_pub IS NOT NULL) AS e2e, (SELECT COUNT(*) FROM messages WHERE sender_id=users.id) AS msgs, (SELECT COUNT(*) FROM reports WHERE target_id=users.id) AS reports FROM users WHERE deleted=0 AND (?='' OR username LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\' OR lower(email) LIKE ? ESCAPE '\\') AND (?=0 OR last_seen>?) ORDER BY ${onlyOnline ? 'last_seen' : 'created_at'} DESC LIMIT 2000`).bind(q, lk, lk, lk, lk, onlyOnline ? 1 : 0, now - 120000).all()).results;
       return json({ users: rows.map((r) => ({ ...r, online: now - r.last_seen < ONLINE_MS })), now });
     }
     if ((mt = p.match(/^\/api\/admin\/users\/([\w-]+)$/)) && m === 'DELETE') {
@@ -1064,15 +1123,18 @@ async function createMessage(env, me, mem, chatId, b, opt = {}) {
   if (mem.c_type === 'group' && mem.c_only_admins && mem.role !== 'admin') err(403, 'Only admins can send messages in this group', 'only_admins');
   if (!(await rateHit(env, 'msg:' + me.id, 120, 60000))) err(429, 'You are sending too fast', 'rate');
   const type = ['text', 'image', 'video', 'file', 'audio', 'voice', 'poll', 'location', 'contact'].includes(b.type) ? b.type : 'text';
-  const text = clamp(b.body, 10000);
+  const encS = b.enc != null ? parseEnc(b.enc) : null;
+  if (b.enc != null && !encS) err(400, 'This encrypted message could not be read by the server (bad format)', 'bad_enc');
+  if (encS && mem.c_channel) err(400, 'Channels are not end-to-end encrypted', 'bad_enc');
+  const text = encS ? '' : clamp(b.body, 10000);
   let meta = {}; let fileId = null;
   if (['image', 'video', 'file', 'audio', 'voice'].includes(type)) {
     const f = await env.DB.prepare('SELECT * FROM files WHERE id=? AND owner_id=?').bind(b.file_id, me.id).first();
     if (!f || f.scope !== 'chat:' + chatId) err(400, 'File not uploaded for this chat', 'bad_file');
     fileId = f.id; const bm = b.meta || {};
-    if (opt.rawMeta) meta = { ...bm, name: f.name, size: f.size, mime: f.mime, once: undefined };
+    if (opt.rawMeta) meta = { ...bm, name: encS ? undefined : f.name, size: f.size, mime: f.mime, once: undefined };
     else {
-      meta = { name: clamp(f.name, 200), size: f.size, mime: f.mime, width: +bm.width || undefined, height: +bm.height || undefined, duration: +bm.duration || undefined, waveform: Array.isArray(bm.waveform) ? bm.waveform.slice(0, 64).map((x) => Math.max(0, Math.min(100, +x | 0))) : undefined, thumb: typeof bm.thumb === 'string' ? bm.thumb : undefined, once: bm.once && ['image', 'video'].includes(type) ? true : undefined };
+      meta = { name: encS ? undefined : clamp(f.name, 200), size: f.size, mime: f.mime, width: +bm.width || undefined, height: +bm.height || undefined, duration: +bm.duration || undefined, waveform: Array.isArray(bm.waveform) ? bm.waveform.slice(0, 64).map((x) => Math.max(0, Math.min(100, +x | 0))) : undefined, thumb: typeof bm.thumb === 'string' ? bm.thumb : undefined, once: bm.once && ['image', 'video'].includes(type) ? true : undefined };
       if (meta.thumb) { const t = await env.DB.prepare('SELECT scope FROM files WHERE id=? AND owner_id=?').bind(meta.thumb, me.id).first(); if (!t || t.scope !== 'chat:' + chatId) delete meta.thumb; }
     }
   } else if (type === 'poll') {
@@ -1080,6 +1142,8 @@ async function createMessage(env, me, mem, chatId, b, opt = {}) {
     const bm = b.meta || {}; const opts = (bm.options || []).map((o) => clamp(o, 100).trim()).filter(Boolean).slice(0, 12);
     if (!clamp(bm.question, 200).trim() || opts.length < 2) err(400, 'A poll needs a question and at least 2 options');
     meta = { question: clamp(bm.question, 200).trim(), options: opts, multi: !!bm.multi };
+  } else if (encS && (type === 'location' || type === 'contact')) {
+    meta = {}; // the place / contact card is inside the encrypted part
   } else if (type === 'location') {
     const bm = b.meta || {}; const lat = +bm.lat, lng = +bm.lng;
     if (!(Math.abs(lat) <= 90) || !(Math.abs(lng) <= 180) || (lat === 0 && lng === 0)) err(400, 'Location looks wrong');
@@ -1088,7 +1152,7 @@ async function createMessage(env, me, mem, chatId, b, opt = {}) {
     const bm = b.meta || {}; const u = await env.DB.prepare('SELECT id, username, name FROM users WHERE id=? AND deleted=0').bind(String(bm.user_id || '')).first();
     if (!u) err(400, 'Contact not found');
     meta = { user_id: u.id, username: u.username, name: u.name };
-  } else if (!text.trim()) err(400, 'Empty message');
+  } else if (!text.trim() && !encS) err(400, 'Empty message');
   let replyTo = null;
   if (b.reply_to) { const r = await env.DB.prepare('SELECT id FROM messages WHERE id=? AND chat_id=?').bind(+b.reply_to, chatId).first(); if (r) replyTo = r.id; }
   if (b.deliver_at) err(400, 'Scheduled messages are not available', 'no_schedule');
@@ -1096,7 +1160,7 @@ async function createMessage(env, me, mem, chatId, b, opt = {}) {
   const expires = mem.c_disappearing ? deliver + mem.c_disappearing * 1000 : null;
   const cid = b.client_id ? clamp(b.client_id, 40) : null;
   if (cid) { const ex = await env.DB.prepare(`SELECT ${MSG_COLS} FROM messages m LEFT JOIN messages r ON r.id=m.reply_to WHERE m.sender_id=? AND m.client_id=?`).bind(me.id, cid).first(); if (ex) return serMsg(ex); }
-  const r = await env.DB.prepare('INSERT INTO messages(chat_id,sender_id,type,body,file_id,meta,reply_to,forwarded,created_at,deliver_at,expires_at,client_id,ver) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(chatId, me.id, type, type === 'poll' ? '' : text, fileId, JSON.stringify(meta), replyTo, opt.forwarded ? 1 : 0, now, deliver, expires, cid, deliver).run();
+  const r = await env.DB.prepare('INSERT INTO messages(chat_id,sender_id,type,body,file_id,meta,reply_to,forwarded,created_at,deliver_at,expires_at,client_id,ver,enc) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(chatId, me.id, type, type === 'poll' ? '' : text, fileId, JSON.stringify(meta), replyTo, opt.forwarded ? 1 : 0, now, deliver, expires, cid, deliver, encS).run();
   await env.DB.batch([
     env.DB.prepare('UPDATE chats SET last_msg_at=MAX(last_msg_at,?) WHERE id=?').bind(deliver, chatId),
     env.DB.prepare('UPDATE members SET hidden=0 WHERE chat_id=? AND hidden=1').bind(chatId),

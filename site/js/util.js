@@ -18,11 +18,14 @@ export const $ = (s, r = document) => r.querySelector(s);
 export const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export function el(html) { const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstElementChild; }
-export const fileUrl = (id, dl) => id ? `/api/files/${encodeURIComponent(id)}${dl ? '?download=1' : ''}` : '';
+// hooks filled by e2e.js (end-to-end encryption): decrypt answers, encrypt outgoing messages/files, decrypted file URLs
+export const hooks = { inbound: null, outbound: null, upload: null, fileUrl: null };
+export const fileUrl = (id, dl) => (hooks.fileUrl && hooks.fileUrl(id, dl)) || (id ? `/api/files/${encodeURIComponent(id)}${dl ? '?download=1' : ''}` : '');
 
 // ---------- API ----------
 export class ApiError extends Error { constructor(msg, status, code) { super(msg); this.status = status; this.code = code; } }
 export async function api(path, opts = {}) {
+  if (hooks.outbound) { const x = await hooks.outbound(path, opts); if (x) opts = x; }
   const o = { method: opts.method || (opts.body !== undefined ? 'POST' : 'GET'), headers: { 'x-avm': '1' }, credentials: 'same-origin' };
   if (opts.timeout) { const ac = new AbortController(); o.signal = ac.signal; setTimeout(() => ac.abort(), opts.timeout); }
   if (opts.body !== undefined) { o.headers['content-type'] = 'application/json'; o.body = JSON.stringify(opts.body); }
@@ -31,9 +34,14 @@ export async function api(path, opts = {}) {
   let data = null; try { data = await r.json(); } catch {}
   if (r.status === 401 && path !== '/api/auth/login') { App.loggedOut && App.loggedOut(); }
   if (!r.ok) throw new ApiError(t((data && data.error) || 'Something went wrong'), r.status, data && data.code);
+  if (hooks.inbound && data && typeof data === 'object') { try { await hooks.inbound(data, path); } catch {} }
   return data;
 }
 export function upload(file, scope, name, onProgress) {
+  if (hooks.upload) return hooks.upload(file, scope, name, onProgress, rawUpload);
+  return rawUpload(file, scope, name, onProgress);
+}
+function rawUpload(file, scope, name, onProgress) {
   return new Promise((resolve, reject) => {
     if (file.size > (S.config.max_file || 52428800)) return reject(new ApiError(t('File too large (max 50 MB)'), 413));
     const x = new XMLHttpRequest();
@@ -196,6 +204,7 @@ export function sysText(m) {
     case 'only_admins': return x.on ? t('{a} changed settings: only admins can send messages', { a }) : t('{a} changed settings: all members can send messages', { a });
     case 'disappearing': return x.seconds ? t('{a} turned on disappearing messages ({d})', { a, d: dLabel(x.seconds) }) : t('{a} turned off disappearing messages', { a });
     case 'pinned': return t('{a} pinned a message', { a });
+    case 'key_changed': return m.sender_id === S.me.id ? '🔒 ' + t('Your security code changed') : '🔒 ' + t('{a}’s security code changed', { a });
     case 'created_channel': return t('{a} created channel “{n}”', { a, n: x.name }); case 'joined_link': return t('{a} joined using the invite link', { a }); case 'joined_channel': return t('{a} joined', { a });
     default: return '';
   }
