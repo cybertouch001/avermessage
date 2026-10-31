@@ -1,4 +1,4 @@
-// Avermessage — chat view: messages, composer, actions.
+// AverChat — chat view: messages, composer, actions.
 import { goBack, popModal, App, S, LS, t, $, $$, esc, el, api, toast, avatar, ICON, fmtTime, fmtDay, dayKey, fmtLastSeen, fmtSize, fmtDur, linkify, emojiOnly, colorFor, previewText, chatTitle, chatAvatarObj, nameOf, sheet, confirmBox, prompt2, openModal, longPress, fileUrl, uid, callLabel, sysText, dLabel, WALLPAPERS, isApp } from './util.js';
 import './info.js';
 
@@ -28,7 +28,7 @@ App.openChat = async (id) => {
 };
 App.closeChat = (fromPop) => {
   if (!S.open) return; S.open = null; document.body.classList.remove('in-chat'); stopTyping();
-  $('#main').innerHTML = `<div class="empty-main"><img src="/icons/icon-192.png" alt=""><h2>Avermessage</h2><p>${t('Pick a chat to start messaging.')}</p></div>`;
+  $('#main').innerHTML = `<div class="empty-main"><img class="brand-logo" src="${App.logoUrl()}" alt=""><h2 class="brand-name">${esc(App.brand().app_name)}</h2><p>${t('Pick a chat to start messaging.')}</p></div>`;
   App.renderList(); if (!fromPop) goBack();
 };
 async function loadMessages(id, before) {
@@ -60,7 +60,7 @@ function renderChat(c) {
   $('#main').innerHTML = `<div class="chat wp-${esc(wp)}" id="chat">
     <header class="bar chat-bar"><button class="ib back" id="c-back">${ICON.back}</button><button class="chat-who" id="c-who"><span id="c-av"></span><span class="who-txt"><b id="c-title"></b><span id="c-sub" class="sub"></span></span></button>
       <div class="bar-btns"><button class="ib" id="c-video" title="${t('Video call')}">${ICON.video}</button><button class="ib" id="c-voice" title="${t('Voice call')}">${ICON.phone}</button><button class="ib" id="c-menu">${ICON.more}</button></div></header>
-    <div id="c-pinned"></div><div id="c-sched"></div>
+    <div id="c-pinned"></div>
     <div class="msgs" id="msgs"><div class="msgs-inner" id="msgs-in"></div></div>
     <button class="jump hidden" id="jump">⌄<span class="badge" id="jumpn"></span></button>
     <div id="c-compose"></div>
@@ -72,7 +72,7 @@ function renderChat(c) {
   const box = $('#msgs');
   box.addEventListener('scroll', () => { if (box.scrollTop < 120 && S.more.get(c.id) && !loadingOlder) loadOlder(c.id); const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 160; $('#jump').classList.toggle('hidden', nearBottom); if (nearBottom) { $('#jumpn').textContent = ''; App.markRead(); } });
   $('#jump').onclick = () => { box.scrollTop = box.scrollHeight; };
-  App.refreshChatHeader(); renderComposer(); renderPinned(); renderSchedChip();
+  App.refreshChatHeader(); renderComposer(); renderPinned();
 }
 function startCall(c, kind) {
   if (c.type === 'group') return toast(t('Group calls are not available yet — call members one-to-one.'));
@@ -99,7 +99,7 @@ function renderMessages(toBottom, keepFrom) {
   const arr = (S.msgs.get(S.open) || []).filter((m) => !m.expires_at || m.expires_at > Date.now());
   let html = ''; let prev = null;
   if (c.disappearing) html += `<div class="sysmsg">${ICON.timer} ${t('Disappearing messages are on ({d}). New messages vanish after that time.', { d: dLabel(c.disappearing) })}</div>`;
-  html += `<div class="sysmsg enc">${ICON.shield} ${t('Messages are sent over an encrypted connection and stored on the Avermessage server (not end-to-end encrypted).')}</div>`;
+  html += `<div class="sysmsg enc">${ICON.shield} ${t('Messages are sent over an encrypted connection and stored on the AverChat server (not end-to-end encrypted).')}</div>`;
   for (const m of arr) { if (!prev || dayKey(prev.deliver_at) !== dayKey(m.deliver_at)) html += `<div class="daysep"><span>${fmtDay(m.deliver_at)}</span></div>`; html += msgHtml(m, prev, c); prev = m; }
   inner.innerHTML = html; bindMsgs(inner);
   if (toBottom) box.scrollTop = box.scrollHeight; else if (keepFrom) box.scrollTop = box.scrollHeight - oldH + oldTop;
@@ -144,6 +144,8 @@ function msgHtml(m, prev, c) {
     if (m.reply) inner += `<button class="quote" data-q="${m.reply.id}" style="border-color:${colorFor(m.reply.sender_id)}"><b style="color:${colorFor(m.reply.sender_id)}">${esc(nameOf(m.reply.sender_id))}</b><span>${esc(m.reply.deleted ? t('This message was deleted') : previewText({ ...m.reply, meta: m.reply.meta || {} }))}</span></button>`;
     inner += App.mediaHtml ? App.mediaHtml(m) : '';
     if (m.type === 'poll') inner += pollHtml(m, c);
+    if (m.type === 'location') inner += locHtml(m);
+    if (m.type === 'contact') inner += `<div class="contactmsg">${avatar({ id: m.meta.user_id, name: m.meta.name }, 44)}<span><b>${esc(m.meta.name)}</b><span class="sub">@${esc(m.meta.username)}</span></span><button class="btn sm" data-dm="${esc(m.meta.user_id)}">${t('Message')}</button></div>`;
     if (m.type === 'call') inner += `<div class="callmsg ${m.meta.status === 'missed' && !mine ? 'missed' : ''}">${m.meta.kind === 'video' ? ICON.video : ICON.phone}<span>${esc(callLabel(m))}</span></div>`;
     if (m.body && m.type !== 'poll') inner += `<div class="txt ${emojiOnly(m.body) && m.type === 'text' ? 'big' : ''}">${linkify(m.body)}</div>`;
   }
@@ -151,6 +153,12 @@ function msgHtml(m, prev, c) {
   const reacts = (m.reactions || []).length ? `<button class="reacts" data-r>${[...new Set(m.reactions.map((r) => r.emoji))].slice(0, 4).join('')}${m.reactions.length > 1 ? `<span>${m.reactions.length}</span>` : ''}</button>` : '';
   const media = ['image', 'video'].includes(m.type) && !m.body && !m.deleted;
   return `<div class="msg ${mine ? 'out' : 'in'} ${first ? 'first' : ''} ${m.pending ? 'pending' : ''} ${media ? 'media-only' : ''}" data-id="${m.id}" ${m.client_id ? `data-cid="${esc(m.client_id)}"` : ''}><div class="bubble">${inner}${meta}</div>${reacts}</div>`;
+}
+function locHtml(m) {
+  const { lat, lng } = m.meta; const z = 15, n = 2 ** z; const fx = ((lng + 180) / 360) * n; const lr = (lat * Math.PI) / 180; const fy = ((1 - Math.asinh(Math.tan(lr)) / Math.PI) / 2) * n;
+  const tx = Math.floor(fx), ty = Math.floor(fy); const px = Math.round((fx - tx) * 100), py = Math.round((fy - ty) * 100);
+  const url = `https://www.google.com/maps?q=${lat},${lng}`;
+  return `<a class="locmsg" href="${url}" target="_blank" rel="noopener"><span class="loctile" style="background-image:url(https://tile.openstreetmap.org/${z}/${tx}/${ty}.png)"><i class="locpin" style="left:${px}%;top:${py}%">📍</i></span><span class="loclbl"><b>${esc(m.meta.label || t('Shared location'))}</b><span class="sub">${lat.toFixed(5)}, ${lng.toFixed(5)}${m.meta.acc ? ' · ±' + m.meta.acc + ' m' : ''}</span></span><span class="locosm">© OpenStreetMap</span></a>`;
 }
 function pollHtml(m, c) {
   const votes = m.votes || []; const total = new Set(votes.map((v) => v.user_id)).size; const mine = new Set(votes.filter((v) => v.user_id === S.me.id).map((v) => v.opt));
@@ -167,6 +175,7 @@ function bindMsgs(root, only) {
     const r = n.querySelector('[data-r]'); if (r) r.onclick = () => { const m = get(); if (m) App.showReactions(m); };
     n.querySelectorAll('.popt').forEach((b) => (b.onclick = () => { const m = get(); if (m) vote(m, +b.dataset.opt); }));
     const pv = n.querySelector('[data-pv]'); if (pv) pv.onclick = () => { const m = get(); if (m) App.pollVotes(m); };
+    const dm = n.querySelector('[data-dm]'); if (dm) dm.onclick = () => (dm.dataset.dm === S.me.id ? null : App.openDirect(dm.dataset.dm));
     App.bindMedia && App.bindMedia(n, get);
     swipeReply(n, get);
   }
@@ -225,15 +234,6 @@ function renderPinned() {
   box.querySelector('button').onclick = () => { App.loadUntil(S.open, id); box._i = idx + 1; setTimeout(renderPinned, 400); };
 }
 App.renderPinned = renderPinned;
-async function renderSchedChip() {
-  const c = S.chats.get(S.open); const box = $('#c-sched'); if (!c || !box || c.left) return;
-  try { const r = await api(`/api/chats/${c.id}/scheduled`); if (S.open !== c.id) return; box.innerHTML = r.messages.length ? `<button class="schedbar">${ICON.sched} ${t('{n} scheduled message(s)', { n: r.messages.length })}</button>` : ''; const b = box.querySelector('button'); if (b) b.onclick = () => schedList(c, r.messages); } catch {}
-}
-App.renderSchedChip = renderSchedChip;
-function schedList(c, list) {
-  const m = openModal(`<div class="dlg"><h3>${t('Scheduled messages')}</h3><div class="list">${list.map((x) => `<div class="row"><span class="row-main"><b>${esc(new Date(x.deliver_at).toLocaleString())}</b><span class="sub">${esc(previewText(x))}</span></span><button class="ib" data-del="${x.id}">${ICON.trash}</button></div>`).join('')}</div><div class="dlg-btns"><button class="btn" data-close>${t('Close')}</button></div></div>`);
-  $$('[data-del]', m.el).forEach((b) => (b.onclick = async () => { try { await api(`/api/messages/${b.dataset.del}/delete`, { body: { for: 'everyone' } }); b.closest('.row').remove(); renderSchedChip(); toast(t('Scheduled message cancelled')); } catch (e) { toast(e.message); } }));
-}
 
 // ---------- composer ----------
 function renderComposer(soft) {
@@ -253,9 +253,6 @@ function renderComposer(soft) {
   ta.oninput = () => { sync(); if (!editing) LS.set('draft-' + c.id, ta.value); sendTyping(); };
   ta.onkeydown = (e) => { const enterSends = S.me.settings && S.me.settings.enter_send !== undefined ? S.me.settings.enter_send : !('ontouchstart' in window); if (e.key === 'Enter' && !e.shiftKey && enterSends) { e.preventDefault(); doSend(); } if (e.key === 'Escape') { setReply(null); setEdit(null); } };
   send.onclick = () => { if (ta.value.trim() || editing) doSend(); else App.startRecording(c); };
-  let schedTm; send.addEventListener('contextmenu', (e) => { e.preventDefault(); if (ta.value.trim()) scheduleSend(); });
-  send.addEventListener('touchstart', () => { if (ta.value.trim()) schedTm = setTimeout(() => { schedTm = 'fired'; scheduleSend(); }, 600); }, { passive: true });
-  send.addEventListener('touchend', (e) => { if (schedTm === 'fired') { e.preventDefault(); } clearTimeout(schedTm); schedTm = null; });
   $('#b-emoji').onclick = () => App.emojiPicker((e) => { const p = ta.selectionStart || ta.value.length; ta.value = ta.value.slice(0, p) + e + ta.value.slice(p); ta.focus(); sync(); }, true);
   $('#b-attach').onclick = () => attachMenu(c);
   $('#b-cam').onclick = () => $('#f-cam').click();
@@ -273,7 +270,8 @@ function attachMenu(c) {
     { icon: ICON.camera, label: t('Camera'), run: () => $('#f-cam').click() },
     { icon: ICON.doc, label: t('Document'), run: () => $('#f-doc').click() },
     c.type === 'group' ? { icon: ICON.poll, label: t('Poll'), run: () => App.newPoll(c) } : null,
-    { icon: ICON.sched, label: t('Schedule a message'), run: () => scheduleSend(true) },
+    { icon: ICON.pin2 || ICON.info, label: t('Location'), run: () => App.shareLocation(c) },
+    { icon: ICON.user || ICON.group, label: t('Contact'), run: () => App.shareContact(c) },
   ]);
 }
 function renderCtx() {
@@ -293,14 +291,6 @@ async function doSend(deliverAt) {
   ta.value = ''; LS.set('draft-' + c.id, ''); ta.dispatchEvent(new Event('input')); stopTyping();
   const rep = replyTo; setReply(null);
   await App.sendMessage(c, { type: 'text', body: text, reply_to: rep ? rep.id : undefined, deliver_at: deliverAt }, rep);
-}
-async function scheduleSend(fromMenu) {
-  const ta = $('#ta'); if (!ta) return;
-  if (fromMenu && !ta.value.trim()) { const txt = await prompt2(t('Message to schedule'), { multiline: true, max: 2000 }); if (!txt) return; ta.value = txt; }
-  if (!ta.value.trim()) return;
-  const d = new Date(Date.now() + 3600000); d.setSeconds(0, 0); const local = new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  const m = openModal(`<form class="dlg"><h3>${ICON.sched} ${t('Schedule message')}</h3><p class="muted">${t('It will be delivered automatically at this time.')}</p><input class="inp" type="datetime-local" required value="${local}"><div class="dlg-btns"><button type="button" class="btn ghost" data-close>${t('Cancel')}</button><button class="btn">${t('Schedule')}</button></div></form>`);
-  m.el.querySelector('form').onsubmit = async (e) => { e.preventDefault(); const v = new Date(m.el.querySelector('input').value).getTime(); if (!(v > Date.now() + 30000)) return toast(t('Pick a time in the future')); m.close(); await doSend(v); toast(t('Message scheduled for {t}', { t: new Date(v).toLocaleString() })); renderSchedChip(); };
 }
 App.sendMessage = async (c, body, rep) => {
   const cid = uid(); const now = Date.now();
@@ -348,7 +338,6 @@ async function chatMenu(id) {
     { icon: ICON.mute, label: muted ? t('Unmute notifications') : t('Mute notifications'), run: () => (muted ? App.setPrefs(c, { muted_until: 0 }) : App.muteMenu(c)) },
     { icon: ICON.lock, label: c.locked ? t('Unlock chat') : t('Lock chat'), run: () => App.toggleLock(c) },
     { icon: ICON.wall, label: t('Wallpaper'), run: () => App.wallpaperMenu(c) },
-    !c.left ? { icon: ICON.sched, label: t('Schedule a message'), run: () => scheduleSend(true) } : null,
     { icon: ICON.trash, label: t('Clear chat'), run: async () => { if (await confirmBox(t('Clear all messages in this chat (only for you)?'), t('Clear'), true)) { await api(`/api/chats/${id}/clear`, { body: {} }); S.msgs.set(id, []); c.last = null; renderMessages(true); App.renderList(); } } },
     u ? { icon: ICON.block, label: u.blocked ? t('Unblock') : t('Block'), danger: !u.blocked, run: () => App.toggleBlock(u) } : null,
     u ? { icon: ICON.flag, label: t('Report'), danger: true, run: () => App.report(u.id, c.id) } : null,

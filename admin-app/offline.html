@@ -1,0 +1,5 @@
+<!doctype html><html><head><meta charset="utf-8"><title>AverChat Admin</title>
+<style>body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0816;color:#f1edfb;font-family:"Segoe UI",system-ui,sans-serif;text-align:center}
+img{width:84px;border-radius:22px}button{margin-top:16px;padding:10px 22px;border:0;border-radius:10px;background:linear-gradient(135deg,#7c3aed,#d946ef);color:#fff;font-size:15px;cursor:pointer}p{color:#a59cc0}</style></head>
+<body><div><img src="build/icon.png" alt=""><h2>Can't reach the AverChat server</h2><p id="m">Check the internet connection and try again.</p><button onclick="go()">Try again</button></div>
+<script>const q=new URLSearchParams(location.search);function go(){location.href=(q.get('server')||'https://avermessage.sites.tab.bot')+'/admin'}setTimeout(go,15000)</script></body></html>

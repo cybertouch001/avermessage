@@ -1,4 +1,4 @@
-// Avermessage — settings, profile, privacy, admin panel.
+// AverChat — settings, profile, privacy, admin panel.
 import { App, S, LS, t, $, $$, esc, el, api, upload, toast, avatar, ICON, fmtListTime, fmtSize, fileUrl, openModal, sheet, confirmBox, prompt2, isApp, lang } from './util.js';
 
 async function saveMe(b, msg) { try { const r = await api('/api/me', { method: 'PATCH', body: b }); S.me = r.user; S.users.set(S.me.id, { ...(S.users.get(S.me.id) || {}), ...S.me }); App.applyTheme(); msg && toast(msg); return true; } catch (e) { toast(e.message); return false; } }
@@ -21,12 +21,12 @@ App.settings = () => {
       </div>
       <div class="card"><button class="row" id="s-help"><span class="ic">${ICON.info}</span><span class="row-main">${t('Help & about')}</span></button>${isApp() ? '' : `<a class="row" href="/download"><span class="ic">${ICON.download}</span><span class="row-main">${t('Get the Android app')}</span></a>`}
       <button class="row danger" id="s-out"><span class="ic">${ICON.logout}</span><span class="row-main">${t('Log out')}</span></button></div>
-      <p class="fine pad center">Avermessage ${esc(S.config.version || '')}</p>`;
+      <p class="fine pad center">AverChat ${esc(S.config.version || '')}</p>`;
     const on = (id, fn) => { const n = $(id, d.body); if (n) n.onclick = fn; };
     on('#s-prof', () => profile(render)); on('#s-priv', () => privacy()); on('#s-chats', chatsSettings); on('#s-notif', notifSettings);
     on('#s-lang', () => sheet(t('App language'), [{ label: 'English', run: async () => { LS.set('lang', 'en'); await setSetting('lang', 'en'); location.reload(); } }, { label: 'हिन्दी (Hindi)', run: async () => { LS.set('lang', 'hi'); await setSetting('lang', 'hi'); location.reload(); } }]));
-    on('#s-acct', account); on('#s-star', () => App.starred()); on('#s-admin', () => App.admin()); on('#s-help', help);
-    on('#s-out', async () => { if (await confirmBox(t('Log out of Avermessage on this device?'), t('Log out'), true)) App.logout(); });
+    on('#s-acct', account); on('#s-star', () => App.starred()); on('#s-admin', () => App.openAdmin()); on('#s-help', help);
+    on('#s-out', async () => { if (await confirmBox(t('Log out of this app on this device?'), t('Log out'), true)) App.logout(); });
   };
   render();
 };
@@ -36,6 +36,7 @@ function profile(after) {
     d.body.innerHTML = `<div class="info-top"><button class="bigav" id="p-av">${avatar(S.me, 140)}<span class="cam">${ICON.camera}</span></button><input type="file" accept="image/*" id="p-file" hidden></div>
       <div class="card"><button class="row" id="p-name"><span class="ic">${ICON.user}</span><span class="row-main"><span class="sub">${t('Name')}</span>${esc(S.me.name)}</span><span class="ic">${ICON.edit}</span></button>
       <button class="row" id="p-about"><span class="ic">${ICON.info}</span><span class="row-main"><span class="sub">${t('About')}</span>${esc(S.me.about || '')}</span><span class="ic">${ICON.edit}</span></button>
+      <button class="row" id="p-email"><span class="ic">${ICON.globe}</span><span class="row-main"><span class="sub">${t('Email')}</span>${esc(S.me.email || t('Not added'))}</span><span class="ic">${ICON.edit}</span></button>
       <button class="row" id="p-phone"><span class="ic">${ICON.phone}</span><span class="row-main"><span class="sub">${t('Phone')}</span>${esc(S.me.phone || t('Not added'))}</span><span class="ic">${ICON.edit}</span></button>
       <div class="row"><span class="ic">@</span><span class="row-main"><span class="sub">${t('Username')}</span>${esc(S.me.username)}</span></div></div>
       <p class="fine pad">${t('People can find you by your username or phone number. Your phone number is only shown to people who saved you as a contact.')}</p>`;
@@ -43,6 +44,7 @@ function profile(after) {
     $('#p-file', d.body).onchange = async (e) => { const f = e.target.files[0]; if (!f) return; try { const sq = await App.squareImage(f, 512); const up = await upload(sq, 'avatar', 'avatar.jpg'); await saveMe({ photo: up.id }, t('Profile photo updated')); render(); after(); } catch (er) { toast(er.message); } };
     $('#p-name', d.body).onclick = async () => { const v = await prompt2(t('Your name'), { value: S.me.name, max: 50 }); if (v && v.trim()) { await saveMe({ name: v.trim() }); render(); after(); } };
     $('#p-about', d.body).onclick = async () => { const v = await prompt2(t('About'), { value: S.me.about || '', max: 140 }); if (v !== null) { await saveMe({ about: v }); render(); after(); } };
+    $('#p-email', d.body).onclick = async () => { const v = await prompt2(t('Email'), { value: S.me.email || '', type: 'email', max: 200, placeholder: 'you@example.com' }); if (v !== null) { try { await saveMe({ email: v.trim() || null }); } catch (e) { return; } render(); after(); } };
     $('#p-phone', d.body).onclick = async () => { const v = await prompt2(t('Phone number'), { value: S.me.phone || '', type: 'tel', max: 16, placeholder: '+91…' }); if (v !== null) { await saveMe({ phone: v.trim() || null }); render(); after(); } };
   };
   render();
@@ -55,7 +57,7 @@ function privacy() {
       <label class="row"><span class="row-main">${t('Read receipts')}<span class="sub">${t('If turned off, you won’t send or receive read receipts in 1:1 chats. Groups always show them.')}</span></span><input type="checkbox" id="pr-rr" ${S.me.read_receipts ? 'checked' : ''}></label></div>
       <div class="card"><button class="row" id="pr-blocked"><span class="ic">${ICON.block}</span><span class="row-main">${t('Blocked contacts')}</span></button>
       <button class="row" id="pr-pin"><span class="ic">${ICON.lock}</span><span class="row-main">${t('Chat lock PIN')}<span class="sub">${S.me.has_pin ? t('On — locked chats need this PIN') : t('Off')}</span></span></button></div>
-      <p class="fine pad">${ICON.shield} ${t('Avermessage sends everything over HTTPS and keeps passwords hashed. Messages are stored on the server and are not end-to-end encrypted, so the server owner could technically access them.')}</p>`;
+      <p class="fine pad">${ICON.shield} ${t('AverChat sends everything over HTTPS and keeps passwords hashed. Messages are stored on the server and are not end-to-end encrypted, so the server owner could technically access them.')}</p>`;
     $$('[data-p]', d.body).forEach((b) => (b.onclick = () => { const k = b.dataset.p; sheet('', ['all', 'contacts', 'none'].map((v) => ({ label: (S.me[k] === v ? '✓ ' : '') + pv(v), run: async () => { await saveMe({ [k]: v }); render(); } }))); }));
     $('#pr-rr', d.body).onchange = (e) => saveMe({ read_receipts: e.target.checked });
     $('#pr-blocked', d.body).onclick = blocked; $('#pr-pin', d.body).onclick = async () => { await App.setPin(); render(); };
@@ -77,12 +79,16 @@ function chatsSettings() {
   const render = () => {
     const st = S.me.settings || {}; const th = st.theme || 'system';
     d.body.innerHTML = `<div class="card"><div class="sect">${t('Display')}</div>
-      <button class="row" id="cs-theme"><span class="ic">${ICON.moon}</span><span class="row-main">${t('Theme')}<span class="sub">${{ system: t('System default'), light: t('Light'), dark: t('Dark') }[th]}</span></span></button>
+      <button class="row" id="cs-theme"><span class="ic">${ICON.moon}</span><span class="row-main">${t('Theme')}<span class="sub">${App.brand().theme !== 'user' ? t('Set by the admin') : { system: t('System default'), light: t('Light'), dark: t('Dark') }[th]}</span></span></button>
       <button class="row" id="cs-wall"><span class="ic">${ICON.wall}</span><span class="row-main">${t('Default wallpaper')}<span class="sub">${esc(st.wallpaper || 'default')}</span></span></button>
       <button class="row" id="cs-font"><span class="ic">Aa</span><span class="row-main">${t('Font size')}<span class="sub">${{ small: t('Small'), normal: t('Medium'), large: t('Large') }[st.font || 'normal']}</span></span></button></div>
+      <div class="card"><div class="sect">${t('Motion')}</div><label class="row"><span class="row-main">${t('Background video')}<span class="sub">${t('Turn off to save battery and data')}</span></span><input type="checkbox" id="cs-bgv" ${LS.get('bgvideo', true) !== false ? 'checked' : ''}></label>
+      <label class="row"><span class="row-main">${t('Intro video on start')}</span><input type="checkbox" id="cs-intro" ${LS.get('intro', true) !== false ? 'checked' : ''}></label></div>
       <div class="card"><label class="row"><span class="row-main">${t('Enter key sends')}<span class="sub">${t('Press Enter to send (Shift+Enter for a new line)')}</span></span><input type="checkbox" id="cs-enter" ${(st.enter_send !== undefined ? st.enter_send : !('ontouchstart' in window)) ? 'checked' : ''}></label></div>`;
     $('#cs-theme', d.body).onclick = () => sheet(t('Theme'), ['system', 'light', 'dark'].map((v) => ({ label: { system: t('System default'), light: t('Light'), dark: t('Dark') }[v], run: async () => { LS.set('theme', v); await setSetting('theme', v); render(); } })));
     $('#cs-wall', d.body).onclick = () => App.wallpaperMenu(null);
+    $('#cs-bgv', d.body).onchange = (e) => App.setBgVideoPref(e.target.checked);
+    $('#cs-intro', d.body).onchange = (e) => LS.set('intro', e.target.checked);
     $('#cs-font', d.body).onclick = () => sheet(t('Font size'), ['small', 'normal', 'large'].map((v) => ({ label: { small: t('Small'), normal: t('Medium'), large: t('Large') }[v], run: async () => { await setSetting('font', v); render(); } })));
     $('#cs-enter', d.body).onchange = (e) => setSetting('enter_send', e.target.checked);
   };
@@ -95,7 +101,7 @@ function notifSettings() {
     d.body.innerHTML = `<div class="card"><button class="row" id="ns-perm"><span class="ic">${ICON.bell}</span><span class="row-main">${t('Allow notifications on this device')}<span class="sub">${perm === 'granted' ? t('Allowed') : perm === 'denied' ? t('Blocked in browser settings') : perm === 'unsupported' ? t('Not supported in this browser') : t('Tap to allow')}</span></span></button>
       <label class="row"><span class="row-main">${t('Sounds')}<span class="sub">${t('Play a sound for new messages while the app is open')}</span></span><input type="checkbox" id="ns-snd" ${st.sounds !== false ? 'checked' : ''}></label>
       <label class="row"><span class="row-main">${t('Show message preview')}</span><input type="checkbox" id="ns-prev" ${st.preview !== false ? 'checked' : ''}></label></div>
-      <p class="fine pad">${ICON.info} ${t('Notifications arrive while Avermessage is open or in the background. When the app or browser is fully closed, new messages show up the next time you open it.')}</p>`;
+      <p class="fine pad">${ICON.info} ${t('Notifications arrive while AverChat is open or in the background. When the app or browser is fully closed, new messages show up the next time you open it.')}</p>`;
     $('#ns-perm', d.body).onclick = async () => { const r = await App.notifPermission(); toast(r === 'granted' ? t('Notifications allowed') : t('Notifications not allowed')); render(); };
     $('#ns-snd', d.body).onchange = (e) => setSetting('sounds', e.target.checked); $('#ns-prev', d.body).onchange = (e) => setSetting('preview', e.target.checked);
   };
@@ -108,10 +114,10 @@ function account() {
   $('#ac-all', d.body).onclick = async () => { if (await confirmBox(t('Log out every other device?'), t('Log out'), true)) { await api('/api/me/logout-all', { body: {} }); toast(t('Done')); } };
   const del = $('#ac-del', d.body); if (del) del.onclick = async () => { if (!(await confirmBox(t('Delete your account? Your profile, contacts and status are removed and you leave all groups. This can’t be undone.'), t('Delete'), true))) return; const pw = await prompt2(t('Confirm with your account password'), { type: 'password', max: 100 }); if (!pw) return; try { await api('/api/me', { method: 'DELETE', body: { password: pw } }); location.href = '/'; } catch (e) { toast(e.message); } };
 }
-const uaName = (ua) => { ua = ua || ''; if (/AvermessageApp/.test(ua)) return 'Avermessage Android app'; const b = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'Browser'; const o = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : ''; return b + (o ? ' · ' + o : ''); };
+const uaName = (ua) => { ua = ua || ''; if (/AverChatApp|AverChatApp/.test(ua)) return 'AverChat Android app'; const b = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'Browser'; const o = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : ''; return b + (o ? ' · ' + o : ''); };
 function help() {
-  App.openDrawer(t('Help & about'), `<div class="pad"><div class="info-top"><img src="/icons/icon-192.png" width="96" alt=""><h2>Avermessage</h2><p class="muted">${t('Version')} ${esc(S.config.version || '')}</p></div>
-    <h3>${t('Tips')}</h3><ul class="tips"><li>${t('Tap and hold (or right-click) a message to reply, react, forward, star, pin, edit or delete it.')}</li><li>${t('Swipe a message to the right to reply.')}</li><li>${t('Tap the microphone to record a voice message; tap send when done.')}</li><li>${t('Long-press the send button to schedule a message.')}</li><li>${t('Format text: *bold*, _italic_, ~strikethrough~.')}</li><li>${t('Lock a chat with a PIN from the chat menu.')}</li></ul>
+  App.openDrawer(t('Help & about'), `<div class="pad"><div class="info-top"><img src="${App.logoUrl()}" width="96" alt=""><h2>${esc(App.brand().app_name)}</h2><p class="muted">${t('Version')} ${esc(S.config.version || '')}</p></div>
+    <h3>${t('Tips')}</h3><ul class="tips"><li>${t('Tap and hold (or right-click) a message to reply, react, forward, star, pin, edit or delete it.')}</li><li>${t('Swipe a message to the right to reply.')}</li><li>${t('Tap the microphone to record a voice message; tap send when done.')}</li><li>${t('Format text: *bold*, _italic_, ~strikethrough~.')}</li><li>${t('Lock a chat with a PIN from the chat menu.')}</li></ul>
     <h3>${t('Privacy & security')}</h3><p class="muted">${t('Passwords are stored as salted hashes. Every connection uses HTTPS. Files and photos can only be opened by members of the chat they were sent in. Messages are stored on the server and are not end-to-end encrypted.')}</p>
     <h3>${t('Limits')}</h3><p class="muted">${t('Files up to 50 MB. Groups up to 256 members. Calls are one-to-one.')}</p></div>`);
 }
@@ -136,3 +142,4 @@ App.admin = async () => {
   };
   $$('.seg button', d.body).forEach((b) => (b.onclick = () => show(b.dataset.k))); show('stats');
 };
+App.settingsPages = { profile, privacy, chatsSettings, notifSettings, account, help, blocked };

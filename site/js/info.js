@@ -1,4 +1,4 @@
-// Avermessage — info screens and chat-level actions.
+// AverChat — info screens and chat-level actions.
 import { App, S, LS, t, $, $$, esc, el, api, toast, avatar, ICON, fmtTime, fmtDay, fmtLastSeen, fmtSize, fmtDur, previewText, chatTitle, chatAvatarObj, nameOf, sheet, confirmBox, prompt2, openModal, fileUrl, dLabel, WALLPAPERS } from './util.js';
 
 App.setPrefs = async (c, b, msg) => { try { await api(`/api/chats/${c.id}/prefs`, { body: b }); Object.assign(c, b); App.renderList(); App.refreshFolders(); if (S.open === c.id) App.reloadOpenChatMeta(); msg && toast(msg); } catch (e) { toast(e.message); } };
@@ -26,7 +26,7 @@ App.toggleBlock = async (u) => {
   try { await api(`/api/users/${u.id}/block`, { body: { on: !u.blocked } }); u.blocked = !u.blocked; toast(u.blocked ? t('Blocked') : t('Unblocked')); if (S.open) { App.renderComposer(); App.refreshChatHeader(); } } catch (e) { toast(e.message); }
 };
 App.report = async (userId, chatId) => {
-  const reason = await prompt2(t('Report to the Avermessage admin. What happened?'), { multiline: true, max: 500, placeholder: t('e.g. spam, abuse, fake account') }); if (reason === null) return;
+  const reason = await prompt2(t('Report to the AverChat admin. What happened?'), { multiline: true, max: 500, placeholder: t('e.g. spam, abuse, fake account') }); if (reason === null) return;
   const block = await confirmBox(t('Also block this contact?'), t('Block'), true);
   try { await api(`/api/users/${userId}/report`, { body: { reason, chat_id: chatId, block } }); if (block) { const u = S.users.get(userId); if (u) u.blocked = true; if (S.open) App.renderComposer(); } toast(t('Reported. Thank you.')); } catch (e) { toast(e.message); }
 };
@@ -52,7 +52,7 @@ App.chatInfo = async (id) => {
       <div class="card"><button class="row" id="gmedia"><span class="ic">${ICON.image}</span><span class="row-main">${t('Media, links and docs')}</span></button>
         <button class="row" id="gdis"><span class="ic">${ICON.timer}</span><span class="row-main">${t('Disappearing messages')}<span class="sub">${dLabel(c.disappearing)}</span></span></button>
         ${admin ? `<label class="row"><span class="ic">${ICON.shield}</span><span class="row-main">${t('Only admins can send messages')}</span><input type="checkbox" id="goa" ${c.only_admins ? 'checked' : ''}></label>` : ''}</div>
-      <div class="card"><div class="sect">${t('{n} members', { n: r.members.length })}</div>${admin ? `<button class="row" id="gadd"><span class="av fold">${ICON.plus}</span><span class="row-main"><b>${t('Add members')}</b></span></button>` : ''}
+      <div class="card"><div class="sect">${t('{n} members', { n: r.members.length })}</div>${admin ? `<button class="row" id="gadd"><span class="av fold">${ICON.plus}</span><span class="row-main"><b>${t('Add members')}</b></span></button><button class="row" id="ginv"><span class="av fold">${ICON.link}</span><span class="row-main"><b>${t('Invite via link')}</b><span class="sub">${t('Anyone with the link can join')}</span></span></button>` : ''}
         ${r.members.sort((a, b) => (a.user_id === S.me.id ? -1 : b.user_id === S.me.id ? 1 : (b.role === 'admin') - (a.role === 'admin'))).map((m) => { const u = S.users.get(m.user_id) || { id: m.user_id, name: '?' }; return `<button class="row" data-mem="${m.user_id}">${avatar(u, 40)}<span class="row-main"><b>${m.user_id === S.me.id ? t('You') : esc(u.name)}</b><span class="sub">${esc(u.about || '@' + (u.username || ''))}</span></span>${m.role === 'admin' ? `<span class="tag">${t('Admin')}</span>` : ''}</button>`; }).join('')}</div>
       <div class="card">${!c.left ? `<button class="row danger" id="gexit"><span class="ic">${ICON.logout}</span><span class="row-main">${t('Exit group')}</span></button>` : `<button class="row danger" id="gdel"><span class="ic">${ICON.trash}</span><span class="row-main">${t('Delete group')}</span></button>`}</div>`;
     const on = (sel, fn) => { const n = $(sel, d.body); if (n) n.onclick = fn; };
@@ -62,6 +62,7 @@ App.chatInfo = async (id) => {
     on('#gd', async () => { const n = await prompt2(t('Group description'), { value: c.description || '', max: 500, multiline: true }); if (n !== null) { await patch({ description: n }); render(); } });
     const oa = $('#goa', d.body); if (oa) oa.onchange = async () => { await patch({ only_admins: oa.checked }); App.renderComposer(); };
     if (admin) { on('#gp', () => $('#gpf', d.body).click()); $('#gpf', d.body).onchange = async (e) => { const f = e.target.files[0]; if (!f) return; try { const sq = await App.squareImage(f, 512); const up = await App.uploadFile(sq, 'group:' + c.id, 'group.jpg'); await patch({ photo: up.id }); render(); App.renderList(); } catch (er) { toast(er.message); } }; }
+    on('#ginv', () => App.inviteLink(c));
     on('#gadd', () => App.pickUsers({ title: t('Add members'), multi: true, exclude: r.members.map((m) => m.user_id), onDone: async (users) => { try { await api(`/api/chats/${id}/members`, { body: { user_ids: users.map((u) => u.id) } }); toast(t('Added')); render(); } catch (e) { toast(e.message); } } }));
     $$('[data-mem]', d.body).forEach((b) => (b.onclick = () => { const uid2 = b.dataset.mem; if (uid2 === S.me.id) return; const mem = r.members.find((m) => m.user_id === uid2); const u = S.users.get(uid2);
       sheet(esc(u.name), [{ icon: ICON.chats, label: t('Message {n}', { n: u.name }), run: () => App.openDirect(uid2) }, { icon: ICON.info, label: t('View {n}', { n: u.name }), run: () => App.userInfo(uid2) },

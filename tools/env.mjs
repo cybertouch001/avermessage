@@ -11,9 +11,9 @@ export function makeEnv(siteDir, dbFile = ':memory:') {
   const FILES = {
     put: async (k, buf, o) => { store.set(k, { buf: Buffer.from(buf), type: o?.httpMetadata?.contentType }); },
     get: async (k, o = {}) => { const v = store.get(k); if (!v) return null; let b = v.buf; if (o.range) b = b.subarray(o.range.offset, o.range.offset + o.range.length); return { body: new Blob([b]).stream(), size: v.buf.length }; },
-    delete: async (k) => { store.delete(k); }, _store: store,
+    delete: async (k) => { for (const x of [].concat(k)) store.delete(x); }, _store: store,
   };
-  const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.mp3': 'audio/mpeg', '.woff2': 'font/woff2' };
+  const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.mp3': 'audio/mpeg', '.woff2': 'font/woff2', '.mp4': 'video/mp4', '.webm': 'video/webm', '.jpg': 'image/jpeg', '.webp': 'image/webp' };
   const ASSETS = { fetch: async (req) => { const u = new URL(req.url); let p = decodeURIComponent(u.pathname); if (p.endsWith('/')) p += 'index.html'; let f = path.join(siteDir, p); const isF = (x) => fs.existsSync(x) && fs.statSync(x).isFile(); if (!isF(f) && isF(f + '.html')) f += '.html'; if (!isF(f) || p.includes('_worker') || p.endsWith('tab-site.json')) return new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain' } }); return new Response(fs.readFileSync(f), { status: 200, headers: { 'content-type': TYPES[path.extname(f)] || 'application/octet-stream' } }); } };
   return { DB, FILES, ASSETS };
 }

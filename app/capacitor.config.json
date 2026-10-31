@@ -1,45 +1,45 @@
 {
-  "appId": "bot.tab.sites.avermessage",
-  "appName": "Avermessage",
-  "webDir": "www",
-  "server": {
-    "url": "https://avermessage.sites.tab.bot",
-    "androidScheme": "https",
-    "allowNavigation": [
-      "avermessage.sites.tab.bot"
-    ],
-    "errorPath": "offline.html",
-    "cleartext": false
+ "appId": "bot.tab.sites.avermessage",
+ "appName": "AverChat",
+ "webDir": "www",
+ "server": {
+  "url": "https://avermessage.sites.tab.bot",
+  "androidScheme": "https",
+  "allowNavigation": [
+   "avermessage.sites.tab.bot"
+  ],
+  "errorPath": "offline.html",
+  "cleartext": false
+ },
+ "android": {
+  "backgroundColor": "#0c0718",
+  "allowMixedContent": false,
+  "captureInput": false,
+  "webContentsDebuggingEnabled": false,
+  "appendUserAgent": "AverChatApp/2.0.0 AvermessageApp/2.0.0"
+ },
+ "plugins": {
+  "SplashScreen": {
+   "launchShowDuration": 600,
+   "launchAutoHide": true,
+   "launchFadeOutDuration": 200,
+   "backgroundColor": "#0c0718",
+   "showSpinner": false,
+   "androidScaleType": "CENTER_INSIDE",
+   "splashFullScreen": false,
+   "splashImmersive": false
   },
-  "android": {
-    "backgroundColor": "#0F1020",
-    "allowMixedContent": false,
-    "captureInput": false,
-    "webContentsDebuggingEnabled": false,
-    "appendUserAgent": "AvermessageApp/1.0.0"
+  "StatusBar": {
+   "style": "DARK",
+   "backgroundColor": "#0c0718",
+   "overlaysWebView": false
   },
-  "plugins": {
-    "SplashScreen": {
-      "launchShowDuration": 2000,
-      "launchAutoHide": true,
-      "launchFadeOutDuration": 250,
-      "backgroundColor": "#0F1020",
-      "showSpinner": false,
-      "androidScaleType": "CENTER_INSIDE",
-      "splashFullScreen": false,
-      "splashImmersive": false
-    },
-    "StatusBar": {
-      "style": "DARK",
-      "backgroundColor": "#3F2FC9",
-      "overlaysWebView": false
-    },
-    "LocalNotifications": {
-      "smallIcon": "ic_stat_avermessage",
-      "iconColor": "#5B3BE0"
-    },
-    "App": {
-      "disableBackButtonHandler": true
-    }
+  "LocalNotifications": {
+   "smallIcon": "ic_stat_avermessage",
+   "iconColor": "#7c3aed"
+  },
+  "App": {
+   "disableBackButtonHandler": true
   }
+ }
 }

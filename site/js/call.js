@@ -1,4 +1,4 @@
-// Avermessage — 1:1 voice and video calls (WebRTC; signalling through the server via /api/calls + sync polling).
+// AverChat — 1:1 voice and video calls (WebRTC; signalling through the server via /api/calls + sync polling).
 import { App, S, LS, t, $, $$, esc, el, api, toast, avatar, ICON, fmtDur, fmtTime, fmtListTime, isApp, plug, nameOf } from './util.js';
 
 let call = null; // {id, peer, kind, role, status, pc, local, remote, pendingIce[], startedAt, timer, ui, muted, camOff, facing, speaker}
@@ -130,7 +130,7 @@ function renderCallUI() {
   const ui = el(`<div id="callui" class="callui ${call.kind}"><video id="call-remote" autoplay playsinline></video><audio id="call-audio" autoplay></audio>
     <div class="call-peer">${avatar(u, 110)}<h2>${esc(u.name)}</h2><p id="call-st">${call.role === 'callee' ? (call.kind === 'video' ? t('Incoming video call') : t('Incoming voice call')) : t('Calling…')}</p><p id="call-rs" class="fine"></p></div>
     <video id="call-local" autoplay playsinline muted></video>
-    <div class="call-ctrls" id="call-ctrls"></div><div class="call-brand">Avermessage · ${call.kind === 'video' ? t('Video call') : t('Voice call')}</div></div>`);
+    <div class="call-ctrls" id="call-ctrls"></div><div class="call-brand">${esc(App.brand().app_name)} · ${call.kind === 'video' ? t('Video call') : t('Voice call')}</div></div>`);
   document.body.appendChild(ui); renderControls();
 }
 function renderControls() {

@@ -40,7 +40,18 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AvmCallPlugin.class);
+        registerPlugin(AvmSecurePlugin.class);
         super.onCreate(savedInstanceState);
+        // screenshots: apply the admin's last known choice before anything is drawn
+        AvmSecurePlugin.apply(this, AvmSecurePlugin.saved(this));
+        NotifyWorker.appAlive = true;
+        NotifyWorker.ensureChannel(this);
+        // background check for new messages while the app is closed (Android runs it about every 15 minutes)
+        try {
+            androidx.work.Constraints cons = new androidx.work.Constraints.Builder().setRequiredNetworkType(androidx.work.NetworkType.CONNECTED).build();
+            androidx.work.PeriodicWorkRequest req = new androidx.work.PeriodicWorkRequest.Builder(NotifyWorker.class, 15, java.util.concurrent.TimeUnit.MINUTES).setConstraints(cons).build();
+            androidx.work.WorkManager.getInstance(this).enqueueUniquePeriodicWork("averchat-notify", androidx.work.ExistingPeriodicWorkPolicy.KEEP, req);
+        } catch (Exception ignored) { }
 
         storagePermission = registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
             DownloadManager.Request r = pendingDownload;
@@ -162,5 +173,20 @@ public class MainActivity extends BridgeActivity {
             name = name.substring(0, 120 - ext.length()) + ext;
         }
         return name;
+    }
+
+    @Override
+    public void onDestroy() {
+        NotifyWorker.appAlive = false;
+        // messages that arrived while the app was open were already shown by the page
+        getSharedPreferences(AvmSecurePlugin.PREFS, MODE_PRIVATE).edit().putLong("notify_since", System.currentTimeMillis()).apply();
+        super.onDestroy();
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        NotifyWorker.appAlive = true;
+        AvmSecurePlugin.apply(this, AvmSecurePlugin.saved(this));
     }
 }

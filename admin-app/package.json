@@ -1,0 +1,49 @@
+{
+ "name": "averchat-admin",
+ "productName": "AverChat Admin",
+ "version": "2.0.0",
+ "description": "AverChat Admin - control panel for the AverChat app",
+ "main": "main.js",
+ "author": "AverChat",
+ "license": "UNLICENSED",
+ "private": true,
+ "devDependencies": {
+  "electron": "33.2.1",
+  "electron-builder": "25.1.8"
+ },
+ "build": {
+  "appId": "bot.tab.sites.averchat.admin",
+  "productName": "AverChat Admin",
+  "copyright": "AverChat",
+  "directories": {
+   "output": "dist",
+   "buildResources": "build"
+  },
+  "files": [
+   "main.js",
+   "offline.html",
+   "build/icon.png",
+   "package.json"
+  ],
+  "win": {
+   "target": [
+    {
+     "target": "portable",
+     "arch": [
+      "x64"
+     ]
+    }
+   ],
+   "icon": "build/icon.ico",
+   "artifactName": "AverChat-Admin.exe"
+  },
+  "portable": {
+   "artifactName": "AverChat-Admin.exe"
+  },
+  "compression": "maximum",
+  "electronLanguages": [
+   "en-US",
+   "hi"
+  ]
+ }
+}

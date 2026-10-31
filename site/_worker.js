@@ -1,10 +1,10 @@
-// Avermessage server — Cloudflare Worker (D1 database "DB", R2 bucket "FILES", static assets "ASSETS").
-// Realtime: clients poll /api/sync (this runtime has no shared WebSocket rooms). Calls: WebRTC, signalling via /api/calls/*.
+// AverChat server (formerly Avermessage) — Cloudflare Worker (D1 database "DB", R2 bucket "FILES", static assets "ASSETS").
+// Realtime: clients long-poll /api/sync (a change counter wakes waiting requests; no shared WebSocket rooms here). Calls: WebRTC, signalling via /api/calls/*.
 // Security: PBKDF2-SHA256 password hashes, HttpOnly session cookies (token stored hashed), login lockout,
 // a custom header on every write (CSRF), every API checks the session, files only for chat members.
 // NOT end-to-end encrypted: data is encrypted in transit (HTTPS) and stored on the server.
 
-const VERSION = '1.0.0';
+const VERSION = '2.0.0';
 const PBKDF2_ITER = 100000;
 const MAX_FILE = 50 * 1024 * 1024;           // 50 MB per file
 const EDIT_WINDOW = 15 * 60 * 1000;          // edit own message within 15 min
@@ -13,10 +13,17 @@ const ONLINE_MS = 30000;
 const RING_MS = 45000;
 const BOOT_HASH = 'ee6e4823c2c93f8de5c095cf06bf370573c2796e734aca5b1d617d49e43b524c';
 const STATUS_TTL = 24 * 3600 * 1000;
-const RESERVED = ['admin','administrator','root','support','avermessage','system','official','help','moderator','mod','staff','owner','security','team','avermontis'];
+// Look & feel the admin controls (served publicly by /api/config so even the login screen is branded).
+const BRAND_DEFAULT = { app_name: 'AverChat', tagline: 'Chat. Call. Connect.', logo: null, preset: 'purple', accent: '#7c3aed', accent2: '#d946ef', bg: '#0c0718', panel: '#1a1130', text: '#f3eefe', bubble_out: '#6d28d9', bubble_in: '#241a3d', font: 'system', layout: 'glass', bubble: 'round', theme: 'dark', intro_enabled: true, intro_video: 'default:intro', bg_video: 'default:aurora', bg_dim: 0.55, screenshots: true, v: 0 };
+const BRAND_FONTS = ['system', 'poppins', 'inter', 'nunito', 'baloo', 'serif', 'mono'];
+const BRAND_LAYOUTS = ['glass', 'solid', 'compact'];
+const DEFAULT_VIDEOS = ['intro', 'aurora', 'particles', 'waves', 'nebula'];
+async function getBrand(env) { return { ...BRAND_DEFAULT, ...(await getSetting(env, 'brand', {})) }; }
+const normEmail = (e) => { if (!e) return null; const s = String(e).trim().toLowerCase(); return /^[^\s@]{1,64}@[^\s@]{1,190}\.[a-z]{2,}$/.test(s) && s.length <= 200 ? s : 'bad'; };
+const RESERVED = ['admin','administrator','root','support','avermessage','averchat','system','official','help','moderator','mod','staff','owner','security','team','avermontis'];
 
 const SCHEMA = [
-`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, phone TEXT UNIQUE, name TEXT NOT NULL, about TEXT DEFAULT 'Hey there! I am using Avermessage.', photo TEXT, pw_hash TEXT NOT NULL, pw_salt TEXT NOT NULL, pw_iter INTEGER NOT NULL, role TEXT NOT NULL DEFAULT 'user', banned INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL DEFAULT 0, p_last_seen TEXT NOT NULL DEFAULT 'all', p_photo TEXT NOT NULL DEFAULT 'all', p_about TEXT NOT NULL DEFAULT 'all', p_status TEXT NOT NULL DEFAULT 'contacts', read_receipts INTEGER NOT NULL DEFAULT 1, pin_hash TEXT, settings TEXT NOT NULL DEFAULT '{}')`,
+`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, phone TEXT UNIQUE, name TEXT NOT NULL, about TEXT DEFAULT 'Hey there! I am using AverChat.', photo TEXT, pw_hash TEXT NOT NULL, pw_salt TEXT NOT NULL, pw_iter INTEGER NOT NULL, role TEXT NOT NULL DEFAULT 'user', banned INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL DEFAULT 0, p_last_seen TEXT NOT NULL DEFAULT 'all', p_photo TEXT NOT NULL DEFAULT 'all', p_about TEXT NOT NULL DEFAULT 'all', p_status TEXT NOT NULL DEFAULT 'contacts', read_receipts INTEGER NOT NULL DEFAULT 1, pin_hash TEXT, settings TEXT NOT NULL DEFAULT '{}')`,
 `CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, last_used INTEGER NOT NULL, ua TEXT)`,
 `CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id)`,
 `CREATE TABLE IF NOT EXISTS attempts (k TEXT PRIMARY KEY, count INTEGER NOT NULL, first_at INTEGER NOT NULL, locked_until INTEGER NOT NULL DEFAULT 0)`,
@@ -45,12 +52,30 @@ const SCHEMA = [
 `CREATE INDEX IF NOT EXISTS statuses_user ON statuses(user_id, expires_at)`,
 `CREATE TABLE IF NOT EXISTS status_views (status_id TEXT NOT NULL, viewer_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(status_id, viewer_id))`,
 `CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)`,
+`CREATE TABLE IF NOT EXISTS bump (k INTEGER PRIMARY KEY, v INTEGER NOT NULL)`,
+`INSERT OR IGNORE INTO bump(k,v) VALUES(1,0)`,
+];
+// v2 migrations: added columns (each ALTER runs once; a duplicate-column error means it already ran).
+const MIGRATIONS = [
+  `ALTER TABLE users ADD COLUMN email TEXT`,
+  `ALTER TABLE chats ADD COLUMN invite_code TEXT`,
+  `ALTER TABLE chats ADD COLUMN channel INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE chats ADD COLUMN public INTEGER NOT NULL DEFAULT 0`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS chats_invite ON chats(invite_code)`,
+  `CREATE INDEX IF NOT EXISTS users_last_seen ON users(last_seen)`,
+  // scheduling was removed in v2: anything still waiting is delivered now
+  `UPDATE messages SET deliver_at=created_at, ver=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE deliver_at>CAST(strftime('%s','now') AS INTEGER)*1000 AND deleted=0`,
 ];
 
 let schemaReady = false;
 async function ensureSchema(env) {
   if (schemaReady) return;
   await env.DB.batch(SCHEMA.map((s) => env.DB.prepare(s)));
+  const sv = await env.DB.prepare(`SELECT v FROM kv WHERE k='schema_v'`).first();
+  if (!sv || +J(sv.v, 0) < 2) {
+    for (const q of MIGRATIONS) { try { await env.DB.prepare(q).run(); } catch (e) { if (!/duplicate column|already exists/i.test(String(e && e.message))) throw e; } }
+    await env.DB.prepare(`INSERT INTO kv(k,v) VALUES('schema_v','2') ON CONFLICT(k) DO UPDATE SET v='2'`).run();
+  }
   schemaReady = true;
 }
 
@@ -69,7 +94,7 @@ function safeEq(a, b) { if (a.length !== b.length) return false; let r = 0; for 
 class HttpError extends Error { constructor(status, msg, code) { super(msg); this.status = status; this.code = code || 'error'; } }
 const err = (status, msg, code) => { throw new HttpError(status, msg, code); };
 const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers } });
-const SEC_HEADERS = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'strict-origin-when-cross-origin', 'x-frame-options': 'DENY', 'permissions-policy': 'camera=(self), microphone=(self), geolocation=()', 'strict-transport-security': 'max-age=31536000' };
+const SEC_HEADERS = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'strict-origin-when-cross-origin', 'x-frame-options': 'DENY', 'permissions-policy': 'camera=(self), microphone=(self), geolocation=(self)', 'strict-transport-security': 'max-age=31536000' };
 function withSec(resp) { const r = new Response(resp.body, resp); for (const [k, v] of Object.entries(SEC_HEADERS)) if (!r.headers.has(k)) r.headers.set(k, v); return r; }
 function parseCookies(h) { const o = {}; (h || '').split(';').forEach((p) => { const i = p.indexOf('='); if (i > 0) o[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim()); }); return o; }
 const clamp = (s, n) => String(s ?? '').slice(0, n);
@@ -129,7 +154,7 @@ function pubUser(u, viewer, rel = {}) {
   o.photo = can(u.p_photo) && !u.deleted ? u.photo || null : null;
   o.about = can(u.p_about) && !u.deleted ? u.about : null;
   if (can(u.p_last_seen) && !u.deleted) { o.last_seen = u.last_seen; o.online = Date.now() - u.last_seen < ONLINE_MS; }
-  if (self) Object.assign(o, { phone: u.phone, p_last_seen: u.p_last_seen, p_photo: u.p_photo, p_about: u.p_about, p_status: u.p_status, read_receipts: !!u.read_receipts, has_pin: !!u.pin_hash, settings: J(u.settings, {}), created_at: u.created_at, role: u.role });
+  if (self) Object.assign(o, { phone: u.phone, email: u.email || null, p_last_seen: u.p_last_seen, p_photo: u.p_photo, p_about: u.p_about, p_status: u.p_status, read_receipts: !!u.read_receipts, has_pin: !!u.pin_hash, settings: J(u.settings, {}), created_at: u.created_at, role: u.role });
   else if (rel.isContact && u.phone && !u.deleted) o.phone = u.phone;
   return o;
 }
@@ -196,6 +221,35 @@ async function sysMsg(env, chatId, actorId, meta) {
 }
 
 // ---------- chats list ----------
+async function joinChat(env, me, c, now, ev) {
+  const ex = await env.DB.prepare('SELECT left_at FROM members WHERE chat_id=? AND user_id=?').bind(c.id, me.id).first();
+  if (ex && !ex.left_at) return;
+  const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM members WHERE chat_id=? AND left_at IS NULL').bind(c.id).first();
+  if (n.n >= (c.channel ? 100000 : 1024)) err(400, 'This group is full');
+  await env.DB.prepare(`INSERT INTO members(chat_id,user_id,role,joined_at,ver) VALUES(?,?,'member',?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET left_at=NULL, role='member', joined_at=excluded.joined_at, hidden=0, ver=excluded.ver`).bind(c.id, me.id, now - 1, now).run();
+  if (!c.channel) await sysMsg(env, c.id, me.id, { ev, actor: me.name });
+  await bumpChat(env, c.id);
+}
+async function adminDeleteUser(env, t, now) {
+  // Removes the person and what they posted: profile scrubbed (username/phone/email freed), sessions, contacts,
+  // blocks, statuses, memberships ended, their messages wiped and their uploaded files deleted from storage.
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE users SET deleted=1, banned=1, name='Deleted account', about='', photo=NULL, phone=NULL, email=NULL, pin_hash=NULL, username=?, pw_hash=?, settings='{}' WHERE id=?`).bind('deleted_' + rid(6).toLowerCase(), rid(24), t.id),
+    env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(t.id),
+    env.DB.prepare('DELETE FROM contacts WHERE user_id=? OR contact_id=?').bind(t.id, t.id),
+    env.DB.prepare('DELETE FROM blocks WHERE user_id=? OR blocked_id=?').bind(t.id, t.id),
+    env.DB.prepare('DELETE FROM status_views WHERE viewer_id=? OR status_id IN (SELECT id FROM statuses WHERE user_id=?)').bind(t.id, t.id),
+    env.DB.prepare('DELETE FROM statuses WHERE user_id=?').bind(t.id),
+    env.DB.prepare('DELETE FROM reactions WHERE user_id=?').bind(t.id),
+    env.DB.prepare('DELETE FROM votes WHERE user_id=?').bind(t.id),
+    env.DB.prepare('DELETE FROM stars WHERE user_id=?').bind(t.id),
+    env.DB.prepare(`UPDATE messages SET deleted=1, body='', meta='{}', file_id=NULL, ver=? WHERE sender_id=? AND type NOT IN ('system','call')`).bind(now, t.id),
+    env.DB.prepare('UPDATE members SET left_at=?, ver=? WHERE user_id=? AND left_at IS NULL').bind(now, now, t.id),
+  ]);
+  const keys = (await env.DB.prepare(`SELECT DISTINCT r2_key FROM files WHERE owner_id=? AND r2_key NOT IN (SELECT r2_key FROM files WHERE owner_id<>?)`).bind(t.id, t.id).all()).results.map((r) => r.r2_key);
+  await env.DB.prepare('DELETE FROM files WHERE owner_id=?').bind(t.id).run();
+  for (let i = 0; i < keys.length; i += 1000) if (env.FILES) await env.FILES.delete(keys.slice(i, i + 1000));
+}
 async function chatList(env, me, onlyId) {
   const now = Date.now();
   const rows = (await env.DB.prepare(`SELECT c.*, m.role AS my_role, m.left_at, m.archived, m.pinned AS my_pinned, m.muted_until, m.locked, m.hidden, m.wallpaper, m.cleared_upto, m.seen_upto, m.joined_at,
@@ -209,7 +263,7 @@ async function chatList(env, me, onlyId) {
     let peer = null;
     if (c.type === 'direct') { peer = await directPeer(env, c.id, me.id); userIds.push(peer); }
     if (last) userIds.push(last.sender_id);
-    out.push({ id: c.id, type: c.type, name: c.name, photo: c.photo, description: c.description, disappearing: c.disappearing, only_admins: !!c.only_admins, pinned_msgs: J(c.pinned, []), created_at: c.created_at, last_msg_at: Math.max(c.last_msg_at, c.created_at), peer_id: peer, my_role: c.my_role, left: !!c.left_at, archived: !!c.archived, pinned: !!c.my_pinned, muted_until: c.muted_until, locked: !!c.locked, wallpaper: c.wallpaper, unread: c.unread, member_count: c.member_count, last: last ? serMsg(last) : null, ver: c.ver });
+    out.push({ id: c.id, type: c.type, channel: !!c.channel, public: !!c.public, name: c.name, photo: c.photo, description: c.description, disappearing: c.disappearing, only_admins: !!c.only_admins, pinned_msgs: J(c.pinned, []), created_at: c.created_at, last_msg_at: Math.max(c.last_msg_at, c.created_at), peer_id: peer, my_role: c.my_role, left: !!c.left_at, archived: !!c.archived, pinned: !!c.my_pinned, muted_until: c.muted_until, locked: !!c.locked, wallpaper: c.wallpaper, unread: c.unread, member_count: c.member_count, last: last ? serMsg(last) : null, ver: c.ver });
   }
   const users = await usersPublic(env, me, userIds);
   return { chats: out, users };
@@ -217,8 +271,10 @@ async function chatList(env, me, onlyId) {
 
 // ---------- sync ----------
 const likeEsc = (s) => String(s).replace(/[\\%_]/g, (c) => '\\' + c);
+async function bumpRead(env) { const r = await env.DB.prepare('SELECT v FROM bump WHERE k=1').first(); return r ? r.v : 0; }
+async function bumpAll(env) { await env.DB.prepare('UPDATE bump SET v=v+1 WHERE k=1').run(); }
 async function sync(env, me, url) {
-  const now = Date.now();
+  let now = Date.now();
   const cur = Math.max(0, +url.searchParams.get('c') || 0);
   const sig = Math.max(0, +url.searchParams.get('s') || 0);
   const peer = url.searchParams.get('peer');
@@ -226,9 +282,21 @@ async function sync(env, me, url) {
     env.DB.prepare(`UPDATE members SET delivered_upto=?, rcpt_ver=? WHERE user_id=? AND left_at IS NULL AND EXISTS (SELECT 1 FROM messages x WHERE x.chat_id=members.chat_id AND x.sender_id<>? AND x.deliver_at>members.delivered_upto AND x.deliver_at<=?)`).bind(now, now, me.id, me.id, now),
   ];
   if (now - me.last_seen > 10000) writes.push(env.DB.prepare('UPDATE users SET last_seen=? WHERE id=?').bind(now, me.id));
-  await env.DB.batch(writes);
+  const wr = await env.DB.batch(writes);
+  if (wr[0] && wr[0].meta && wr[0].meta.changes > 0) await bumpAll(env);
+  // long-poll: the client sends the change counter it last saw (b) and how long it may wait (w ms).
+  // Nothing changed since -> hold the request, re-reading the one-row counter, until something does or time runs out.
+  let bv = await bumpRead(env);
+  const seen = url.searchParams.has('b') ? +url.searchParams.get('b') : -1;
+  const wait = Math.min(Math.max(0, +url.searchParams.get('w') || 0), 20000);
+  if (wait && seen === bv) {
+    const until = Date.now() + wait; const step = wait > 6000 ? 700 : 400;
+    while (Date.now() < until) { await new Promise((r) => setTimeout(r, step)); const v = await bumpRead(env); if (v !== bv) { bv = v; break; } }
+  }
+  now = Date.now();
   const stale = (await env.DB.prepare(`SELECT * FROM calls WHERE status IN ('ringing','accepted') AND ((status='ringing' AND created_at<?) OR (status='accepted' AND ver<?)) AND (caller_id=? OR callee_id=?)`).bind(now - RING_MS, now - 6 * 3600000, me.id, me.id).all()).results;
   for (const c of stale) await finishCall(env, c, c.status === 'ringing' ? 'missed' : 'ended', c.caller_id);
+  if (stale.length) await bumpAll(env);
   const [msgs, rc, ty, calls, sigs, chg] = await env.DB.batch([
     env.DB.prepare(`SELECT ${MSG_COLS} FROM messages m JOIN members cm ON cm.chat_id=m.chat_id AND cm.user_id=? LEFT JOIN messages r ON r.id=m.reply_to WHERE m.ver>? AND m.deliver_at<=? AND m.deliver_at>=cm.joined_at AND m.deliver_at>cm.cleared_upto AND (cm.left_at IS NULL OR m.deliver_at<=cm.left_at) AND m.id NOT IN (SELECT message_id FROM hidden WHERE user_id=?) ORDER BY m.ver LIMIT 400`).bind(me.id, cur, now, me.id),
     env.DB.prepare(`SELECT o.chat_id, o.user_id, o.delivered_upto, o.read_upto, o.left_at FROM members o JOIN members mine ON mine.chat_id=o.chat_id AND mine.user_id=? WHERE o.user_id<>? AND o.rcpt_ver>?`).bind(me.id, me.id, cur),
@@ -237,10 +305,11 @@ async function sync(env, me, url) {
     env.DB.prepare(`SELECT * FROM signals WHERE to_id=? AND id>? ORDER BY id LIMIT 300`).bind(me.id, sig),
     env.DB.prepare(`SELECT 1 AS x FROM members m JOIN chats c ON c.id=m.chat_id WHERE m.user_id=? AND (m.ver>? OR c.ver>?) LIMIT 1`).bind(me.id, cur, cur),
   ]);
-  const out = { now, c: now - 5000, s: sig, messages: await enrichMessages(env, me, msgs.results), receipts: rc.results, typing: ty.results, calls: calls.results, signals: sigs.results.map((s) => ({ ...s, payload: J(s.payload, null) })), chats_changed: chg.results.length > 0 };
+  const out = { now, b: bv, c: now - 5000, s: sig, messages: await enrichMessages(env, me, msgs.results), receipts: rc.results, typing: ty.results, calls: calls.results, signals: sigs.results.map((s) => ({ ...s, payload: J(s.payload, null) })), chats_changed: chg.results.length > 0 };
   if (sigs.results.length) out.s = sigs.results[sigs.results.length - 1].id;
   if (msgs.results.length === 400) out.c = msgs.results[399].ver - 1;
   if (peer) { const pu = await usersPublic(env, me, [peer]); out.presence = pu[peer] ? { id: peer, online: !!pu[peer].online, last_seen: pu[peer].last_seen || null } : null; }
+  const br = await getSetting(env, 'brand', {}); out.brand_v = br.v || 0;
   const lastSweep = await getSetting(env, 'sweep', 0);
   if (now - lastSweep > 3600000) await sweep(env, now);
   return out;
@@ -316,7 +385,18 @@ async function api(req, env, url) {
   const body = async () => { if ((req.headers.get('content-type') || '').includes('application/json')) { try { return await req.json(); } catch { err(400, 'Bad JSON'); } } return {}; };
 
   if (p === '/api/health') return json({ ok: true, version: VERSION, time: Date.now() });
-  if (p === '/api/config' && m === 'GET') { const s = await getSetting(env, 'public', {}); return json({ version: VERSION, max_file: MAX_FILE, announcement: s.announcement || '', signup_open: s.signup_open !== false }); }
+  if (p === '/api/config' && m === 'GET') { const s = await getSetting(env, 'public', {}); return json({ version: VERSION, max_file: MAX_FILE, announcement: s.announcement || '', announcement_at: s.announcement_at || 0, signup_open: s.signup_open !== false, phone_required: true, brand: await getBrand(env) }, 200, { 'cache-control': 'no-cache' }); }
+  if ((mt = p.match(/^\/api\/brand\/(f_[\w]+)$/)) && (m === 'GET' || m === 'HEAD')) {
+    // admin-chosen logo / intro / background video: public, read-only, only files uploaded with scope 'brand'
+    const f = await env.DB.prepare(`SELECT * FROM files WHERE id=? AND scope='brand'`).bind(mt[1]).first(); if (!f) err(404, 'Not found');
+    const range = req.headers.get('range'); let opts = {}; let start = 0, end = f.size - 1;
+    const rm = range && range.match(/^bytes=(\d*)-(\d*)$/);
+    if (rm && (rm[1] || rm[2])) { if (rm[1]) { start = +rm[1]; end = rm[2] ? Math.min(+rm[2], f.size - 1) : f.size - 1; } else { start = Math.max(0, f.size - +rm[2]); } if (start > end || start >= f.size) return new Response(null, { status: 416, headers: { 'content-range': `bytes */${f.size}` } }); opts.range = { offset: start, length: end - start + 1 }; }
+    const obj = await env.FILES.get(f.r2_key, opts); if (!obj) err(404, 'Not found');
+    const h = { 'content-type': /^(image\/(png|jpeg|webp|gif)|video\/(mp4|webm))$/.test(f.mime) ? f.mime : 'application/octet-stream', 'cache-control': 'public, max-age=31536000, immutable', 'accept-ranges': 'bytes', 'content-length': String(end - start + 1), 'content-security-policy': "default-src 'none'; sandbox" };
+    if (opts.range) h['content-range'] = `bytes ${start}-${end}/${f.size}`;
+    return new Response(m === 'HEAD' ? null : obj.body, { status: opts.range ? 206 : 200, headers: h });
+  }
 
   if (p === '/api/auth/signup' && m === 'POST') {
     const b = await body(); const pub = await getSetting(env, 'public', {});
@@ -326,12 +406,14 @@ async function api(req, env, url) {
     if (usernameReserved(username)) err(400, 'This username is not available', 'username_taken');
     if (!name) err(400, 'Please enter your name', 'name');
     if (pw.length < 8) err(400, 'Password must be at least 8 characters', 'password');
+    if (!String(b.phone || '').trim()) err(400, 'Phone number is required for new accounts', 'phone_required');
     const phone = normPhone(b.phone); if (phone === 'bad') err(400, 'Phone number looks wrong (8–15 digits)', 'phone');
+    const email = normEmail(b.email); if (email === 'bad') err(400, 'Email address looks wrong', 'email');
     if (!(await rateHit(env, 'signup:' + ip(req), 10, 3600000))) err(429, 'Too many sign-ups from this network. Try later.', 'rate');
     const ex = await env.DB.prepare('SELECT username, phone FROM users WHERE username=? OR (phone IS NOT NULL AND phone=?)').bind(username, phone || '-').first();
     if (ex) err(409, ex.username === username ? 'This username is taken' : 'This phone number is already registered', 'taken');
     const h = await hashPassword(pw); const id = 'u_' + rid(10); const now = Date.now();
-    await env.DB.prepare('INSERT INTO users(id,username,phone,name,pw_hash,pw_salt,pw_iter,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?)').bind(id, username, phone, name, h.hash, h.salt, h.iterations, now, now).run();
+    await env.DB.prepare('INSERT INTO users(id,username,phone,email,name,pw_hash,pw_salt,pw_iter,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(id, username, phone, email, name, h.hash, h.salt, h.iterations, now, now).run();
     const cookie = await newSession(env, req, id);
     const u = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
     return json({ user: pubUser(u, u) }, 200, { 'set-cookie': cookie });
@@ -361,13 +443,25 @@ async function api(req, env, url) {
     const ex = await env.DB.prepare(`SELECT id FROM users WHERE role='admin' LIMIT 1`).first(); if (ex) err(409, 'Admin already exists', 'exists');
     if (String(b.password || '').length < 10) err(400, 'weak');
     const h = await hashPassword(String(b.password)); const now = Date.now();
-    await env.DB.prepare(`INSERT INTO users(id,username,phone,name,about,pw_hash,pw_salt,pw_iter,role,created_at,last_seen,p_last_seen) VALUES(?,?,?,?,?,?,?,?,'admin',?,?,'none')`).bind('u_admin', 'admin', null, 'Avermessage Admin', 'Owner of this Avermessage server', h.hash, h.salt, h.iterations, now, now).run();
+    await env.DB.prepare(`INSERT INTO users(id,username,phone,name,about,pw_hash,pw_salt,pw_iter,role,created_at,last_seen,p_last_seen) VALUES(?,?,?,?,?,?,?,?,'admin',?,?,'none')`).bind('u_admin', 'admin', null, 'AverChat Admin', 'Owner of this AverChat server', h.hash, h.salt, h.iterations, now, now).run();
     return json({ ok: true });
   }
 
   const me = await auth(env, req);
   const now = Date.now();
 
+  // ---- background notification check (used by the Android app's periodic worker when the app is closed) ----
+  if (p === '/api/notify' && m === 'GET') {
+    const since = Math.max(+url.searchParams.get('since') || 0, now - 2 * 86400000);
+    const rows = (await env.DB.prepare(`SELECT m.id, m.chat_id, m.sender_id, m.type, substr(m.body,1,120) AS body, m.meta, m.deliver_at, c.type AS c_type, c.name AS c_name, u.name AS s_name
+      FROM messages m JOIN members cm ON cm.chat_id=m.chat_id AND cm.user_id=? AND cm.left_at IS NULL JOIN chats c ON c.id=m.chat_id JOIN users u ON u.id=m.sender_id
+      WHERE m.deliver_at>? AND m.deliver_at<=? AND m.sender_id<>? AND m.deleted=0 AND m.type NOT IN ('system') AND cm.muted_until<? AND m.deliver_at>cm.seen_upto AND m.deliver_at>=cm.joined_at
+      AND m.sender_id NOT IN (SELECT blocked_id FROM blocks WHERE user_id=?) ORDER BY m.deliver_at DESC LIMIT 30`).bind(me.id, since, now, me.id, now, me.id).all()).results;
+    const ring = (await env.DB.prepare(`SELECT c.id, c.kind, u.name AS caller FROM calls c JOIN users u ON u.id=c.caller_id WHERE c.callee_id=? AND c.status='ringing' AND c.created_at>?`).bind(me.id, now - RING_MS).all()).results;
+    const label = (r) => { const mm = J(r.meta, {}); return r.type === 'text' ? r.body : r.type === 'image' ? '📷 Photo' : r.type === 'video' ? '🎥 Video' : r.type === 'voice' ? '🎤 Voice message' : r.type === 'audio' ? '🎵 Audio' : r.type === 'file' ? '📄 ' + (mm.name || 'Document') : r.type === 'poll' ? '📊 ' + (mm.question || 'Poll') : r.type === 'location' ? '📍 Location' : r.type === 'contact' ? '👤 Contact' : r.type === 'call' ? '📞 Call' : 'New message'; };
+    const brand = await getBrand(env);
+    return json({ now, app_name: brand.app_name, screenshots: brand.screenshots !== false, messages: rows.map((r) => ({ id: r.id, chat_id: r.chat_id, title: r.c_type === 'group' ? r.c_name : r.s_name, sender: r.s_name, group: r.c_type === 'group', text: label(r), at: r.deliver_at })), calls: ring });
+  }
   if (p === '/api/sync' && m === 'GET') return json(await sync(env, me, url));
   if (p === '/api/me' && m === 'GET') return json({ user: pubUser(me, me), ice: await iceServers(env), config: await getSetting(env, 'public', {}) });
   if (p === '/api/me' && m === 'PATCH') {
@@ -378,6 +472,7 @@ async function api(req, env, url) {
     for (const k of ['p_last_seen', 'p_photo', 'p_about', 'p_status']) if (b[k] !== undefined) { if (!['all', 'contacts', 'none'].includes(b[k])) err(400, 'Bad privacy value'); sets.push(k + '=?'); args.push(b[k]); }
     if (b.read_receipts !== undefined) { sets.push('read_receipts=?'); args.push(b.read_receipts ? 1 : 0); }
     if (b.settings !== undefined) { const s = JSON.stringify(b.settings || {}); if (s.length > 4000) err(400, 'Settings too large'); sets.push('settings=?'); args.push(s); }
+    if (b.email !== undefined) { const em = normEmail(b.email); if (em === 'bad') err(400, 'Email address looks wrong'); sets.push('email=?'); args.push(em); }
     if (b.phone !== undefined) { const ph = b.phone ? normPhone(b.phone) : null; if (ph === 'bad') err(400, 'Phone number looks wrong'); if (ph) { const ex = await env.DB.prepare('SELECT id FROM users WHERE phone=? AND id<>?').bind(ph, me.id).first(); if (ex) err(409, 'This phone number is already registered'); } sets.push('phone=?'); args.push(ph); }
     if (sets.length) await env.DB.prepare(`UPDATE users SET ${sets.join(',')} WHERE id=?`).bind(...args, me.id).run();
     const u = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(me.id).first();
@@ -494,11 +589,58 @@ async function api(req, env, url) {
     if (ok.length) await sysMsg(env, id, me.id, { ev: 'added', actor: me.name, targets: ok.map((u) => u.name) });
     const l = await chatList(env, me, id); return json({ chat: l.chats[0], users: l.users, skipped: ids.length - ok.length });
   }
+  // ---- channels, invite links ----
+  if (p === '/api/chats/channel' && m === 'POST') {
+    const b = await body(); const name = clamp(b.name, 60).trim(); if (!name) err(400, 'Please enter a channel name');
+    if (!(await rateHit(env, 'chan:' + me.id, 20, 86400000))) err(429, 'Too many new channels today');
+    const id = 'g_' + rid(10);
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO chats(id,type,name,description,photo,created_by,created_at,last_msg_at,ver,only_admins,channel,public) VALUES(?,'group',?,?,?,?,?,?,?,1,1,?)`).bind(id, name, clamp(b.description, 500), null, me.id, now, now, now, b.public ? 1 : 0),
+      env.DB.prepare(`INSERT INTO members(chat_id,user_id,role,joined_at,ver) VALUES(?,?,'admin',?,?)`).bind(id, me.id, now - 1, now),
+    ]);
+    await sysMsg(env, id, me.id, { ev: 'created_channel', actor: me.name, name });
+    const l = await chatList(env, me, id); return json({ chat: l.chats[0], users: l.users });
+  }
+  if (p === '/api/channels' && m === 'GET') {
+    const q = clamp(url.searchParams.get('q'), 40).trim().toLowerCase();
+    const rows = (await env.DB.prepare(`SELECT c.id, c.name, c.description, c.photo, (SELECT COUNT(*) FROM members mm WHERE mm.chat_id=c.id AND mm.left_at IS NULL) AS member_count, EXISTS(SELECT 1 FROM members x WHERE x.chat_id=c.id AND x.user_id=? AND x.left_at IS NULL) AS joined FROM chats c WHERE c.channel=1 AND c.public=1 AND (?='' OR lower(c.name) LIKE ?) ORDER BY member_count DESC, c.last_msg_at DESC LIMIT 50`).bind(me.id, q, '%' + likeEsc(q) + '%').all()).results;
+    return json({ channels: rows.map((r) => ({ ...r, joined: !!r.joined })) });
+  }
+  if ((mt = p.match(/^\/api\/chats\/([\w-]+)\/join$/)) && m === 'POST') {
+    const c = await env.DB.prepare('SELECT * FROM chats WHERE id=?').bind(mt[1]).first();
+    if (!c || !c.channel || !c.public) err(404, 'Channel not found');
+    await joinChat(env, me, c, now, 'joined_channel');
+    const l = await chatList(env, me, c.id); return json({ chat: l.chats[0], users: l.users });
+  }
+  if ((mt = p.match(/^\/api\/chats\/([\w-]+)\/invite$/)) && (m === 'POST' || m === 'GET')) {
+    const mem = await member(env, mt[1], me.id); if (mem.c_type !== 'group') err(400, 'Invite links are for groups and channels');
+    if (mem.role !== 'admin') err(403, 'Only admins can share the invite link', 'not_admin');
+    const c = await env.DB.prepare('SELECT invite_code FROM chats WHERE id=?').bind(mt[1]).first();
+    let code = c.invite_code; const b = m === 'POST' ? await body() : {};
+    if (b.revoke) { await env.DB.prepare('UPDATE chats SET invite_code=NULL WHERE id=?').bind(mt[1]).run(); return json({ code: null }); }
+    if (!code || b.reset) { code = rid(9).replace(/[^A-Za-z0-9]/g, 'k'); await env.DB.prepare('UPDATE chats SET invite_code=? WHERE id=?').bind(code, mt[1]).run(); }
+    return json({ code, url: new URL('/join/' + code, req.url).href });
+  }
+  if ((mt = p.match(/^\/api\/invite\/([A-Za-z0-9]{6,20})(\/join)?$/))) {
+    const c = await env.DB.prepare('SELECT * FROM chats WHERE invite_code=?').bind(mt[1]).first();
+    if (!c) err(404, 'This invite link is not valid anymore', 'bad_invite');
+    if (!mt[2] && m === 'GET') {
+      const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM members WHERE chat_id=? AND left_at IS NULL').bind(c.id).first();
+      const mine = await env.DB.prepare('SELECT left_at FROM members WHERE chat_id=? AND user_id=?').bind(c.id, me.id).first();
+      return json({ chat: { id: c.id, name: c.name, description: c.description, photo: c.photo, channel: !!c.channel, member_count: n.n, joined: !!(mine && !mine.left_at) } });
+    }
+    if (mt[2] && m === 'POST') {
+      if (!(await rateHit(env, 'join:' + me.id, 60, 3600000))) err(429, 'Too many joins, try later');
+      await joinChat(env, me, c, now, c.channel ? 'joined_channel' : 'joined_link');
+      const l = await chatList(env, me, c.id); return json({ chat: l.chats[0], users: l.users });
+    }
+  }
   if ((mt = p.match(/^\/api\/chats\/([\w-]+)$/)) && m === 'GET') {
     await member(env, mt[1], me.id, false);
     const l = await chatList(env, me, mt[1]);
     const ms = (await env.DB.prepare('SELECT user_id, role, joined_at, left_at FROM members WHERE chat_id=?').bind(mt[1]).all()).results;
-    const active = ms.filter((x) => !x.left_at);
+    let active = ms.filter((x) => !x.left_at);
+    if (l.chats[0] && l.chats[0].channel && l.chats[0].my_role !== 'admin') active = active.filter((x) => x.role === 'admin' || x.user_id === me.id);
     const users = await usersPublic(env, me, active.map((x) => x.user_id));
     return json({ chat: l.chats[0], members: active.map((x) => ({ user_id: x.user_id, role: x.role, joined_at: x.joined_at })), users: { ...l.users, ...users } });
   }
@@ -584,11 +726,6 @@ async function api2(req, env, url, me, body) {
     const rows = (await env.DB.prepare(`SELECT ${MSG_COLS} FROM messages m LEFT JOIN messages r ON r.id=m.reply_to WHERE m.chat_id=? AND m.deliver_at<? AND m.deliver_at<=? AND m.deliver_at>=? AND m.deliver_at>? AND (? IS NULL OR m.deliver_at<=?) AND (m.expires_at IS NULL OR m.expires_at>?) AND m.id NOT IN (SELECT message_id FROM hidden WHERE user_id=?) ORDER BY m.deliver_at DESC, m.id DESC LIMIT ?`).bind(mt[1], before, now, mem.joined_at, mem.cleared_upto, mem.left_at, mem.left_at, now, me.id, limit).all()).results;
     const receipts = (await env.DB.prepare('SELECT user_id, delivered_upto, read_upto, left_at FROM members WHERE chat_id=? AND user_id<>?').bind(mt[1], me.id).all()).results;
     return json({ messages: (await enrichMessages(env, me, rows)).reverse(), receipts, more: rows.length === limit });
-  }
-  if ((mt = p.match(/^\/api\/chats\/([\w-]+)\/scheduled$/)) && m === 'GET') {
-    await member(env, mt[1], me.id);
-    const rows = (await env.DB.prepare(`SELECT ${MSG_COLS} FROM messages m LEFT JOIN messages r ON r.id=m.reply_to WHERE m.chat_id=? AND m.sender_id=? AND m.deliver_at>? AND m.deleted=0 ORDER BY m.deliver_at`).bind(mt[1], me.id, now).all()).results;
-    return json({ messages: rows.map((r) => serMsg(r)) });
   }
   if ((mt = p.match(/^\/api\/chats\/([\w-]+)\/search$/)) && m === 'GET') {
     const mem = await member(env, mt[1], me.id, false); const q = clamp(url.searchParams.get('q'), 60).trim(); if (!q) return json({ messages: [] });
@@ -707,6 +844,7 @@ async function api2(req, env, url, me, body) {
     if (len > MAX_FILE) err(413, 'File too large (max 50 MB)', 'too_large');
     let sc;
     if (scope === 'avatar' || scope === 'status' || scope === 'group-new') sc = scope === 'group-new' ? 'group:new' : scope;
+    else if (scope === 'brand') { if (me.role !== 'admin') err(403, 'Admins only'); sc = 'brand'; if (!/^(image\/(png|jpeg|webp|gif)|video\/(mp4|webm))$/.test(mime)) err(400, 'Logo: PNG/JPG/WebP image. Video: MP4 or WebM.'); }
     else if (/^chat:[\w-]+$/.test(scope)) { const mem = await member(env, scope.slice(5), me.id); sc = scope; }
     else if (/^group:[\w-]+$/.test(scope)) { const mem = await member(env, scope.slice(6), me.id); if (mem.role !== 'admin') err(403, 'Only group admins'); sc = scope; }
     else err(400, 'Bad scope');
@@ -820,12 +958,66 @@ async function api2(req, env, url, me, body) {
         env.DB.prepare(`SELECT COUNT(*) AS n FROM chats WHERE type='group'`), env.DB.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(size),0) AS bytes FROM files'),
         env.DB.prepare('SELECT COUNT(*) AS n FROM calls'), env.DB.prepare('SELECT COUNT(*) AS n FROM reports WHERE resolved=0'), env.DB.prepare('SELECT COUNT(*) AS n FROM statuses WHERE expires_at>?').bind(now),
       ]);
-      return json({ users: u.results[0].n, new_users_24h: u24.results[0].n, active_24h: act.results[0].n, messages: msgs.results[0].n, messages_24h: m24.results[0].n, direct_chats: ch.results[0].n, groups: gr.results[0].n, files: fl.results[0].n, file_bytes: fl.results[0].bytes, calls: cl.results[0].n, open_reports: rp.results[0].n, live_statuses: st.results[0].n });
+      const on = await env.DB.prepare('SELECT COUNT(*) AS n FROM users WHERE last_seen>? AND deleted=0').bind(now - ONLINE_MS).first();
+      return json({ online_now: on.n, users: u.results[0].n, new_users_24h: u24.results[0].n, active_24h: act.results[0].n, messages: msgs.results[0].n, messages_24h: m24.results[0].n, direct_chats: ch.results[0].n, groups: gr.results[0].n, files: fl.results[0].n, file_bytes: fl.results[0].bytes, calls: cl.results[0].n, open_reports: rp.results[0].n, live_statuses: st.results[0].n });
     }
     if (p === '/api/admin/users' && m === 'GET') {
-      const q = clamp(url.searchParams.get('q'), 40).trim().toLowerCase();
-      const rows = (await env.DB.prepare(`SELECT id, username, name, phone, role, banned, deleted, created_at, last_seen, (SELECT COUNT(*) FROM messages WHERE sender_id=users.id) AS msgs, (SELECT COUNT(*) FROM reports WHERE target_id=users.id) AS reports FROM users WHERE (?='' OR username LIKE ? OR lower(name) LIKE ? OR phone LIKE ?) ORDER BY created_at DESC LIMIT 200`).bind(q, '%' + q + '%', '%' + q + '%', '%' + q + '%').all()).results;
-      return json({ users: rows });
+      // Passwords are never readable (stored only as salted PBKDF2 hashes); the admin can set a new one instead.
+      const q = clamp(url.searchParams.get('q'), 60).trim().toLowerCase(); const lk = '%' + likeEsc(q) + '%';
+      const onlyOnline = url.searchParams.get('online') === '1';
+      const rows = (await env.DB.prepare(`SELECT id, username, name, phone, email, role, banned, deleted, created_at, last_seen, (SELECT COUNT(*) FROM messages WHERE sender_id=users.id) AS msgs, (SELECT COUNT(*) FROM reports WHERE target_id=users.id) AS reports FROM users WHERE deleted=0 AND (?='' OR username LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\' OR lower(email) LIKE ? ESCAPE '\\') AND (?=0 OR last_seen>?) ORDER BY ${onlyOnline ? 'last_seen' : 'created_at'} DESC LIMIT 2000`).bind(q, lk, lk, lk, lk, onlyOnline ? 1 : 0, now - 120000).all()).results;
+      return json({ users: rows.map((r) => ({ ...r, online: now - r.last_seen < ONLINE_MS })), now });
+    }
+    if ((mt = p.match(/^\/api\/admin\/users\/([\w-]+)$/)) && m === 'DELETE') {
+      const t = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(mt[1]).first(); if (!t || t.deleted) err(404, 'User not found'); if (t.role === 'admin') err(400, 'The admin account can’t be deleted');
+      await adminDeleteUser(env, t, now);
+      return json({ ok: true });
+    }
+    if ((mt = p.match(/^\/api\/admin\/users\/([\w-]+)\/password$/)) && m === 'POST') {
+      const b = await body(); const pw = String(b.password || ''); if (pw.length < 8) err(400, 'Password must be at least 8 characters');
+      const t = await env.DB.prepare('SELECT id, role, username FROM users WHERE id=? AND deleted=0').bind(mt[1]).first(); if (!t) err(404, 'User not found');
+      if (t.role === 'admin' && t.id !== me.id) err(400, 'Not allowed');
+      const h = await hashPassword(pw);
+      await env.DB.batch([env.DB.prepare('UPDATE users SET pw_hash=?, pw_salt=?, pw_iter=? WHERE id=?').bind(h.hash, h.salt, h.iterations, t.id), env.DB.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash<>?').bind(t.id, me.token_hash), env.DB.prepare('DELETE FROM attempts WHERE k=?').bind('login:u:' + t.username)]);
+      return json({ ok: true });
+    }
+    if (p === '/api/admin/brand' && m === 'GET') return json({ brand: await getBrand(env), defaults: BRAND_DEFAULT, fonts: BRAND_FONTS, layouts: BRAND_LAYOUTS, videos: DEFAULT_VIDEOS });
+    if (p === '/api/admin/brand' && m === 'POST') {
+      const b = await body(); const cur = await getBrand(env); const nx = { ...cur };
+      const color = (v) => (/^#[0-9a-fA-F]{6}$/.test(String(v)) ? String(v).toLowerCase() : null);
+      const video = async (v) => { v = String(v || ''); if (v === 'none') return v; if (v.startsWith('default:') && DEFAULT_VIDEOS.includes(v.slice(8))) return v; if (/^file:f_\w+$/.test(v)) { const f = await env.DB.prepare(`SELECT mime FROM files WHERE id=? AND scope='brand'`).bind(v.slice(5)).first(); if (f && /^video\//.test(f.mime)) return v; } err(400, 'Bad video choice'); };
+      if (b.reset) { await setSetting(env, 'brand', { v: now }); return json({ brand: await getBrand(env) }); }
+      if (b.app_name !== undefined) { const n = clamp(b.app_name, 30).trim(); if (!n) err(400, 'App name cannot be empty'); nx.app_name = n; }
+      if (b.tagline !== undefined) nx.tagline = clamp(b.tagline, 80);
+      if (b.preset !== undefined) nx.preset = clamp(b.preset, 20);
+      for (const k of ['accent', 'accent2', 'bg', 'panel', 'text', 'bubble_out', 'bubble_in']) if (b[k] !== undefined) { const c = color(b[k]); if (!c) err(400, 'Colours must look like #7c3aed'); nx[k] = c; }
+      if (b.font !== undefined) { if (!BRAND_FONTS.includes(b.font)) err(400, 'Unknown font'); nx.font = b.font; }
+      if (b.layout !== undefined) { if (!BRAND_LAYOUTS.includes(b.layout)) err(400, 'Unknown layout'); nx.layout = b.layout; }
+      if (b.bubble !== undefined) nx.bubble = b.bubble === 'square' ? 'square' : 'round';
+      if (b.theme !== undefined) nx.theme = ['dark', 'light', 'user'].includes(b.theme) ? b.theme : 'dark';
+      if (b.logo !== undefined) { if (b.logo) { const f = await env.DB.prepare(`SELECT mime FROM files WHERE id=? AND scope='brand'`).bind(String(b.logo)).first(); if (!f || !/^image\//.test(f.mime)) err(400, 'Bad logo'); } nx.logo = b.logo || null; }
+      if (b.intro_video !== undefined) nx.intro_video = await video(b.intro_video);
+      if (b.bg_video !== undefined) nx.bg_video = await video(b.bg_video);
+      if (b.intro_enabled !== undefined) nx.intro_enabled = !!b.intro_enabled;
+      if (b.bg_dim !== undefined) nx.bg_dim = Math.max(0, Math.min(0.9, +b.bg_dim || 0));
+      if (b.screenshots !== undefined) nx.screenshots = !!b.screenshots;
+      nx.v = now;
+      const save = {}; for (const k of Object.keys(BRAND_DEFAULT)) if (nx[k] !== BRAND_DEFAULT[k]) save[k] = nx[k];
+      await setSetting(env, 'brand', save);
+      return json({ brand: await getBrand(env) });
+    }
+    if (p === '/api/admin/brand/files' && m === 'GET') {
+      const rows = (await env.DB.prepare(`SELECT id, name, mime, size, created_at FROM files WHERE scope='brand' ORDER BY created_at DESC LIMIT 100`).all()).results; return json({ files: rows });
+    }
+    if ((mt = p.match(/^\/api\/admin\/brand\/files\/(f_\w+)$/)) && m === 'DELETE') {
+      const br = await getBrand(env); const used = [br.logo, br.intro_video, br.bg_video].some((v) => v && String(v).endsWith(mt[1]));
+      if (used) err(400, 'This file is in use. Pick another one first.');
+      await dropFile(env, mt[1]); return json({ ok: true });
+    }
+    if (p === '/api/admin/announce' && m === 'POST') {
+      const b = await body(); const pub = await getSetting(env, 'public', { announcement: '', signup_open: true });
+      pub.announcement = clamp(b.text, 300); pub.announcement_at = pub.announcement ? now : 0; await setSetting(env, 'public', pub);
+      return json({ ok: true });
     }
     if ((mt = p.match(/^\/api\/admin\/users\/([\w-]+)\/ban$/)) && m === 'POST') {
       const b = await body(); const t = await env.DB.prepare('SELECT role FROM users WHERE id=?').bind(mt[1]).first(); if (!t) err(404, 'User not found'); if (t.role === 'admin') err(400, 'The admin can’t be banned');
@@ -842,7 +1034,7 @@ async function api2(req, env, url, me, body) {
     if (p === '/api/admin/settings' && m === 'POST') {
       const b = await body();
       if (b.turn) { const urls = (Array.isArray(b.turn.urls) ? b.turn.urls : String(b.turn.urls || '').split(/[\s,]+/)).map((x) => clamp(x, 200).trim()).filter((x) => /^(turns?|stuns?):/.test(x)).slice(0, 6); await setSetting(env, 'turn', { urls, username: clamp(b.turn.username, 200), credential: clamp(b.turn.credential, 200) }); }
-      if (b.public) await setSetting(env, 'public', { announcement: clamp(b.public.announcement, 300), signup_open: b.public.signup_open !== false });
+      if (b.public) { const old = await getSetting(env, 'public', {}); const a = clamp(b.public.announcement, 300); await setSetting(env, 'public', { announcement: a, announcement_at: a && a !== old.announcement ? now : (old.announcement_at || 0), signup_open: b.public.signup_open !== false }); }
       return json({ ok: true });
     }
   }
@@ -854,7 +1046,7 @@ async function createMessage(env, me, mem, chatId, b, opt = {}) {
   if (mem.c_type === 'direct') { const peer = await directPeer(env, chatId, me.id); if (await isBlockedEither(env, me.id, peer)) err(403, 'You can’t message this contact (blocked)', 'blocked'); }
   if (mem.c_type === 'group' && mem.c_only_admins && mem.role !== 'admin') err(403, 'Only admins can send messages in this group', 'only_admins');
   if (!(await rateHit(env, 'msg:' + me.id, 120, 60000))) err(429, 'You are sending too fast', 'rate');
-  const type = ['text', 'image', 'video', 'file', 'audio', 'voice', 'poll'].includes(b.type) ? b.type : 'text';
+  const type = ['text', 'image', 'video', 'file', 'audio', 'voice', 'poll', 'location', 'contact'].includes(b.type) ? b.type : 'text';
   const text = clamp(b.body, 10000);
   let meta = {}; let fileId = null;
   if (['image', 'video', 'file', 'audio', 'voice'].includes(type)) {
@@ -871,11 +1063,19 @@ async function createMessage(env, me, mem, chatId, b, opt = {}) {
     const bm = b.meta || {}; const opts = (bm.options || []).map((o) => clamp(o, 100).trim()).filter(Boolean).slice(0, 12);
     if (!clamp(bm.question, 200).trim() || opts.length < 2) err(400, 'A poll needs a question and at least 2 options');
     meta = { question: clamp(bm.question, 200).trim(), options: opts, multi: !!bm.multi };
+  } else if (type === 'location') {
+    const bm = b.meta || {}; const lat = +bm.lat, lng = +bm.lng;
+    if (!(Math.abs(lat) <= 90) || !(Math.abs(lng) <= 180) || (lat === 0 && lng === 0)) err(400, 'Location looks wrong');
+    meta = { lat: Math.round(lat * 1e6) / 1e6, lng: Math.round(lng * 1e6) / 1e6, acc: Math.max(0, Math.min(100000, +bm.acc | 0)) || undefined, label: clamp(bm.label, 120) || undefined };
+  } else if (type === 'contact') {
+    const bm = b.meta || {}; const u = await env.DB.prepare('SELECT id, username, name FROM users WHERE id=? AND deleted=0').bind(String(bm.user_id || '')).first();
+    if (!u) err(400, 'Contact not found');
+    meta = { user_id: u.id, username: u.username, name: u.name };
   } else if (!text.trim()) err(400, 'Empty message');
   let replyTo = null;
   if (b.reply_to) { const r = await env.DB.prepare('SELECT id FROM messages WHERE id=? AND chat_id=?').bind(+b.reply_to, chatId).first(); if (r) replyTo = r.id; }
-  let deliver = now;
-  if (b.deliver_at) { deliver = +b.deliver_at; if (!(deliver > now + 30000) || deliver > now + 365 * 86400000) err(400, 'Pick a time in the future (within a year)', 'bad_time'); }
+  if (b.deliver_at) err(400, 'Scheduled messages are not available', 'no_schedule');
+  const deliver = now;
   const expires = mem.c_disappearing ? deliver + mem.c_disappearing * 1000 : null;
   const cid = b.client_id ? clamp(b.client_id, 40) : null;
   if (cid) { const ex = await env.DB.prepare(`SELECT ${MSG_COLS} FROM messages m LEFT JOIN messages r ON r.id=m.reply_to WHERE m.sender_id=? AND m.client_id=?`).bind(me.id, cid).first(); if (ex) return serMsg(ex); }
@@ -891,6 +1091,14 @@ async function createMessage(env, me, mem, chatId, b, opt = {}) {
 }
 
 // ---------- APK download (stored as chunks under /_dl/) ----------
+async function serveChunks(env, req, manifest, type) {
+  const man = await env.ASSETS.fetch(new Request(new URL('/_dl/' + manifest, req.url)));
+  if (!man.ok) return new Response('Not uploaded yet.', { status: 404 });
+  const info = await man.json();
+  const { readable, writable } = new FixedLengthStream(info.size);
+  (async () => { const w = writable.getWriter(); try { for (const c of info.chunks) { const r = await env.ASSETS.fetch(new Request(new URL('/_dl/' + c, req.url))); await w.write(new Uint8Array(await r.arrayBuffer())); } await w.close(); } catch (e) { await w.abort(e); } })();
+  return new Response(readable, { headers: { 'content-type': type, 'content-disposition': `attachment; filename="${info.filename}"`, 'content-length': String(info.size), 'cache-control': 'no-cache', 'x-robots-tag': 'noindex' } });
+}
 async function serveApk(env, req) {
   const man = await env.ASSETS.fetch(new Request(new URL('/_dl/apk.json', req.url)));
   if (!man.ok) return new Response('The Android app is not uploaded yet.', { status: 404 });
@@ -904,8 +1112,17 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     try {
-      if (url.pathname.startsWith('/api/')) { await ensureSchema(env); return withSec(await api(req, env, url)); }
-      if (url.pathname === '/download/avermessage.apk' || url.pathname === '/avermessage.apk') return withSec(await serveApk(env, req));
+      if (url.pathname.startsWith('/api/')) {
+        await ensureSchema(env);
+        const r = await api(req, env, url);
+        if (req.method !== 'GET' && req.method !== 'HEAD' && r.status < 400) { try { await bumpAll(env); } catch {} }
+        return withSec(r);
+      }
+      if (url.pathname === '/download/averchat.apk' || url.pathname === '/download/avermessage.apk' || url.pathname === '/avermessage.apk') return withSec(await serveApk(env, req));
+      if (url.pathname === '/download/admin/AverChat-Admin.exe') return withSec(await serveChunks(env, req, 'exe.json', 'application/vnd.microsoft.portable-executable'));
+      if (url.pathname === '/download/admin/info.json') { const r = await env.ASSETS.fetch(new Request(new URL('/_dl/exe.json', req.url))); return withSec(new Response(r.ok ? await r.text() : '{}', { status: r.ok ? 200 : 404, headers: { 'content-type': 'application/json', 'cache-control': 'no-cache' } })); }
+      if (url.pathname === '/download/admin' || url.pathname === '/download/admin/') { const r = withSec(await env.ASSETS.fetch(new Request(new URL('/admin-download.html', req.url), req))); r.headers.set('x-robots-tag', 'noindex, nofollow'); r.headers.set('cache-control', 'no-cache'); return r; }
+      if (url.pathname === '/admin' || url.pathname === '/admin/') { const r = withSec(await env.ASSETS.fetch(new Request(new URL('/admin.html', req.url), req))); r.headers.set('x-robots-tag', 'noindex, nofollow'); r.headers.set('cache-control', 'no-cache'); return r; }
       if (url.pathname.startsWith('/_dl/')) return new Response('Not found', { status: 404 });
       if (url.pathname === '/download' || url.pathname === '/download/') return withSec(await env.ASSETS.fetch(new Request(new URL('/download.html', req.url), req)));
       let r = await env.ASSETS.fetch(req);

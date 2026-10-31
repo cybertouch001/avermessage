@@ -1,4 +1,4 @@
-// Avermessage — shared helpers, state, API client, i18n, UI primitives.
+// AverChat — shared helpers, state, API client, i18n, UI primitives.
 import { HI } from './i18n-hi.js';
 export const App = {};                     // modules register their functions here (avoids import cycles)
 export const S = {
@@ -24,6 +24,7 @@ export const fileUrl = (id, dl) => id ? `/api/files/${encodeURIComponent(id)}${d
 export class ApiError extends Error { constructor(msg, status, code) { super(msg); this.status = status; this.code = code; } }
 export async function api(path, opts = {}) {
   const o = { method: opts.method || (opts.body !== undefined ? 'POST' : 'GET'), headers: { 'x-avm': '1' }, credentials: 'same-origin' };
+  if (opts.timeout) { const ac = new AbortController(); o.signal = ac.signal; setTimeout(() => ac.abort(), opts.timeout); }
   if (opts.body !== undefined) { o.headers['content-type'] = 'application/json'; o.body = JSON.stringify(opts.body); }
   let r;
   try { r = await fetch(path, o); } catch (e) { throw new ApiError(t('No internet connection'), 0, 'network'); }
@@ -174,6 +175,7 @@ export function previewText(m) {
     case 'voice': return '🎤 ' + t('Voice message') + (m.meta.duration ? ' (' + fmtDur(m.meta.duration) + ')' : ''); case 'audio': return '🎵 ' + (m.meta.name || t('Audio'));
     case 'file': return '📄 ' + (m.meta.name || t('Document')); case 'poll': return '📊 ' + (m.meta.question || t('Poll'));
     case 'call': return (m.meta.kind === 'video' ? '🎥 ' : '📞 ') + callLabel(m);
+    case 'location': return '📍 ' + (m.meta.label || t('Location')); case 'contact': return '👤 ' + (m.meta.name || t('Contact'));
     case 'system': return sysText(m);
     default: return m.body;
   }
@@ -194,6 +196,7 @@ export function sysText(m) {
     case 'only_admins': return x.on ? t('{a} changed settings: only admins can send messages', { a }) : t('{a} changed settings: all members can send messages', { a });
     case 'disappearing': return x.seconds ? t('{a} turned on disappearing messages ({d})', { a, d: dLabel(x.seconds) }) : t('{a} turned off disappearing messages', { a });
     case 'pinned': return t('{a} pinned a message', { a });
+    case 'created_channel': return t('{a} created channel “{n}”', { a, n: x.name }); case 'joined_link': return t('{a} joined using the invite link', { a }); case 'joined_channel': return t('{a} joined', { a });
     default: return '';
   }
 }

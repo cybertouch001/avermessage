@@ -1,11 +1,11 @@
-// Avermessage — Status (24-hour stories).
+// AverChat — Status (24-hour stories).
 import { App, S, LS, t, $, $$, esc, el, api, upload, toast, avatar, ICON, fmtListTime, fileUrl, openModal, sheet, confirmBox } from './util.js';
 
 const BGS = ['#4b38dc', '#7a3ae6', '#c2410c', '#0e7490', '#be185d', '#15803d', '#1f2937', '#b45309'];
 let data = { statuses: [], users: {} };
 async function load() { data = await api('/api/status'); Object.values(data.users).forEach((u) => S.users.set(u.id, { ...(S.users.get(u.id) || {}), ...u })); const dot = $('#tb-status'); if (dot) dot.classList.toggle('show', data.statuses.some((s) => s.user_id !== S.me.id && !s.seen)); return data; }
-setInterval(() => { if (S.me && S.tab !== 'status') load().catch(() => {}); }, 120000);
-setTimeout(() => S.me && load().catch(() => {}), 4000);
+setInterval(() => { if (S.me && S.tab !== 'status') load().then(() => App.renderStrip && App.renderStrip()).catch(() => {}); }, 60000);
+setTimeout(() => S.me && load().then(() => App.renderStrip && App.renderStrip()).catch(() => {}), 1500);
 App.renderStatusTab = async () => {
   const body = $('#tabbody'); if (!body) return;
   body.innerHTML = `<div class="loading">${t('Loading…')}</div>`;
@@ -29,6 +29,7 @@ App.renderStatusTab = async () => {
   $('#st-file').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) mediaStatus(f); };
   $$('[data-u]', body).forEach((b) => (b.onclick = () => { const g = groups.find((x) => x.uid === b.dataset.u); view(g.uid, g.list); }));
 };
+App.statusLoad = load; App.statusData = () => data; App.statusView = (uid, list) => view(uid, list);
 App.newStatus = () => sheet(t('New status'), [{ icon: ICON.edit, label: t('Text'), run: textStatus }, { icon: ICON.camera, label: t('Photo or video'), run: () => { const i = el('<input type="file" accept="image/*,video/*">'); i.onchange = () => i.files[0] && mediaStatus(i.files[0]); i.click(); } }]);
 function textStatus() {
   let bi = 0;

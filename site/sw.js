@@ -1,4 +1,4 @@
-// Avermessage service worker: lets the browser show notifications and install the app. No offline caching of data.
+// AverChat service worker: lets the browser show notifications and install the app. No offline caching of data.
 self.addEventListener('install', (e) => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', () => {});

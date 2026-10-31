@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- adaptive icon background: the brand indigo -> violet vertical gradient -->
+<!-- adaptive icon background: AverChat violet gradient -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <gradient android:angle="270" android:startColor="#4B38DC" android:endColor="#7A3AE6" android:type="linear" />
+    <gradient android:angle="315" android:startColor="#4C1D95" android:centerColor="#7C3AED" android:endColor="#D946EF" android:type="linear" />
 </shape>

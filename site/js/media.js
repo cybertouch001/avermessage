@@ -1,5 +1,5 @@
-// Avermessage — media: uploads, images, video, voice notes, viewer, emoji, notifications, sounds.
-import { App, S, LS, t, $, $$, esc, el, api, upload, toast, ICON, fmtSize, fmtDur, fileUrl, openModal, isApp, plug, chatTitle, previewText, nameOf } from './util.js';
+// AverChat — media: uploads, images, video, voice notes, viewer, emoji, notifications, sounds.
+import { App, S, LS, t, $, $$, esc, el, api, upload, toast, ICON, fmtSize, fmtDur, fileUrl, openModal, isApp, plug, chatTitle, previewText, nameOf, avatar, chatAvatarObj } from './util.js';
 
 App.uploadFile = (blob, scope, name, onProg) => upload(blob, scope, name, onProg);
 
@@ -178,10 +178,21 @@ App.notifPermission = async () => {
   if (!('Notification' in window)) return 'unsupported'; return await Notification.requestPermission();
 };
 let nid = 1;
+// instant in-app notification (top banner) when a message lands in another chat while the app is open
+function inAppBanner(c, m, st) {
+  const title = c.type === 'group' ? chatTitle(c) : nameOf(m.sender_id);
+  const body = c.locked || st.preview === false ? t('New message') : (c.type === 'group' ? nameOf(m.sender_id) + ': ' : '') + previewText(m);
+  document.querySelectorAll('.inapp').forEach((x) => x.remove());
+  const n = document.createElement('button'); n.className = 'inapp';
+  n.innerHTML = `${avatar(chatAvatarObj(c), 38)}<span><b>${esc(title)}</b><span>${esc(body).slice(0, 140)}</span></span>`;
+  n.onclick = () => { n.remove(); App.openChat(c.id); };
+  document.body.appendChild(n); requestAnimationFrame(() => n.classList.add('in'));
+  setTimeout(() => { n.classList.remove('in'); setTimeout(() => n.remove(), 300); }, 4000);
+}
 App.notify = async (c, m) => {
   const muted = c.muted_until > Date.now(); if (muted) return;
   const st = S.me.settings || {};
-  if (!document.hidden && S.open !== c.id) App.sound('msg');
+  if (!document.hidden && S.open !== c.id) { App.sound('msg'); inAppBanner(c, m, st); }
   if (!document.hidden) return;
   const title = c.type === 'group' ? chatTitle(c) : nameOf(m.sender_id);
   const body = c.locked || st.preview === false ? t('New message') : (c.type === 'group' ? nameOf(m.sender_id) + ': ' : '') + previewText(m);

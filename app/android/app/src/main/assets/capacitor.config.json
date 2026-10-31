@@ -1,6 +1,6 @@
 {
 	"appId": "bot.tab.sites.avermessage",
-	"appName": "Avermessage",
+	"appName": "AverChat",
 	"webDir": "www",
 	"server": {
 		"url": "https://avermessage.sites.tab.bot",
@@ -12,18 +12,18 @@
 		"cleartext": false
 	},
 	"android": {
-		"backgroundColor": "#0F1020",
+		"backgroundColor": "#0c0718",
 		"allowMixedContent": false,
 		"captureInput": false,
 		"webContentsDebuggingEnabled": false,
-		"appendUserAgent": "AvermessageApp/1.0.0"
+		"appendUserAgent": "AverChatApp/2.0.0 AvermessageApp/2.0.0"
 	},
 	"plugins": {
 		"SplashScreen": {
-			"launchShowDuration": 2000,
+			"launchShowDuration": 600,
 			"launchAutoHide": true,
-			"launchFadeOutDuration": 250,
-			"backgroundColor": "#0F1020",
+			"launchFadeOutDuration": 200,
+			"backgroundColor": "#0c0718",
 			"showSpinner": false,
 			"androidScaleType": "CENTER_INSIDE",
 			"splashFullScreen": false,
@@ -31,12 +31,12 @@
 		},
 		"StatusBar": {
 			"style": "DARK",
-			"backgroundColor": "#3F2FC9",
+			"backgroundColor": "#0c0718",
 			"overlaysWebView": false
 		},
 		"LocalNotifications": {
 			"smallIcon": "ic_stat_avermessage",
-			"iconColor": "#5B3BE0"
+			"iconColor": "#7c3aed"
 		},
 		"App": {
 			"disableBackButtonHandler": true

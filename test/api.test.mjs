@@ -31,10 +31,12 @@ let ua, ub, uc, direct, group;
 test('signup + reserved names + login lockout', async () => {
   ua = ok(await A.post('/api/auth/signup', { name: 'Asha', username: 'asha', phone: '9876543210', password: 'secret-pass-1' })).user;
   assert.equal(ua.phone, '+919876543210');
-  ub = ok(await B.post('/api/auth/signup', { name: 'Bilal', username: 'bilal', password: 'secret-pass-2' })).user;
-  uc = ok(await C.post('/api/auth/signup', { name: 'Chitra', username: 'chitra', password: 'secret-pass-3' })).user;
-  for (const bad of ['admin', 'Adm1n', 'admin_1', 'the.admin', 'avermessage', 'support']) assert.equal((await X.post('/api/auth/signup', { name: 'x', username: bad, password: 'aaaaaaaa1' })).status, 400, bad);
-  assert.equal((await X.post('/api/auth/signup', { name: 'x', username: 'asha', password: 'aaaaaaaa1' })).status, 409);
+  assert.equal((await X.post('/api/auth/signup', { name: 'NoPhone', username: 'nophone', password: 'aaaaaaaa1' })).status, 400, 'phone required for new accounts');
+  assert.equal((await X.post('/api/auth/signup', { name: 'BadMail', username: 'badmail', phone: '9000000097', email: 'nope', password: 'aaaaaaaa1' })).status, 400, 'bad email refused');
+  ub = ok(await B.post('/api/auth/signup', { name: 'Bilal', username: 'bilal', phone: '9000000002', email: 'Bilal@Example.com', password: 'secret-pass-2' })).user;
+  uc = ok(await C.post('/api/auth/signup', { name: 'Chitra', username: 'chitra', phone: '9000000003', password: 'secret-pass-3' })).user;
+  for (const bad of ['admin', 'Adm1n', 'admin_1', 'the.admin', 'avermessage', 'support']) assert.equal((await X.post('/api/auth/signup', { name: 'x', username: bad, phone: '9000000099', password: 'aaaaaaaa1' })).status, 400, bad);
+  assert.equal((await X.post('/api/auth/signup', { name: 'x', username: 'asha', phone: '9000000098', password: 'aaaaaaaa1' })).status, 409);
   assert.equal((await X.post('/api/auth/signup', { name: 'x', username: 'zed1', phone: '+919876543210', password: 'aaaaaaaa1' })).status, 409);
   assert.equal((await X.get('/api/me')).status, 401);
   assert.equal((await A.call('POST', '/api/chats/group', { name: 'x' }, { headers: { 'x-avm': '0' } })).status, 403, 'csrf header required');
@@ -138,15 +140,10 @@ test('groups: create, admin rules, add/remove, poll, only-admins, forward', asyn
   ok(await B.del(`/api/chats/${group.id}/members/${ub.id}`)); ok(await A.del(`/api/chats/${group.id}/members/${ua.id}`));
 });
 
-test('scheduled and disappearing messages', async () => {
+test('no scheduled messages; disappearing messages', async () => {
   const due = Date.now() + 120000;
-  const sm = ok(await A.post(`/api/chats/${direct.id}/messages`, { body: 'Happy birthday!', deliver_at: due })).message;
-  assert.equal(ok(await A.get(`/api/chats/${direct.id}/scheduled`)).messages.length, 1);
-  assert.ok(!ok(await B.get(`/api/chats/${direct.id}/messages`)).messages.some((m) => m.id === sm.id), 'not visible before time');
-  const cur = ok(await B.get('/api/sync?c=0')).c;
-  shift += 130000;
-  const s2 = ok(await B.get('/api/sync?c=' + cur)); assert.ok(s2.messages.some((m) => m.id === sm.id), 'arrives when due');
-  assert.equal((await A.post(`/api/chats/${direct.id}/messages`, { body: 'x', deliver_at: Date.now() - 5 })).status, 400);
+  assert.equal((await A.post(`/api/chats/${direct.id}/messages`, { body: 'Happy birthday!', deliver_at: due })).status, 400, 'scheduling refused');
+  assert.equal((await A.get(`/api/chats/${direct.id}/scheduled`)).status, 404, 'no scheduled endpoint');
   ok(await B.patch(`/api/chats/${direct.id}`, { disappearing: 86400 }));
   const dm = ok(await A.post(`/api/chats/${direct.id}/messages`, { body: 'vanish' })).message; assert.ok(dm.expires_at > dm.deliver_at);
   shift += 86400000 + 5000;
@@ -219,4 +216,57 @@ test('admin: bootstrap once, stats, ban, settings; non-admin refused', async () 
   ok(await AD.post('/api/admin/settings', { turn: { urls: 'turn:turn.example.org:3478', username: 'u', credential: 'p' }, public: { announcement: 'Welcome!' } }));
   assert.equal(ok(await A.get('/api/ice')).ice.length, 2);
   assert.ok(ok(await AD.get('/api/admin/reports')).reports.length >= 1);
+});
+
+test('v2: legacy no-phone login, long-poll, location/contact, invites, channels, notify, admin brand/users/delete/password', async () => {
+  // a user created before the phone rule (no phone) still logs in
+  const { hashPassword } = await import(tmp);
+  const h = await hashPassword('legacy-pass-1');
+  await env.DB.prepare('INSERT INTO users(id,username,phone,name,pw_hash,pw_salt,pw_iter,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?)').bind('u_legacy1', 'oldie', null, 'Old User', h.hash, h.salt, h.iterations, Date.now() - 86400000 * 30, 0).run();
+  const L = client('1.1.1.9'); const lu = ok(await L.post('/api/auth/login', { id: 'oldie', password: 'legacy-pass-1' })).user; assert.equal(lu.phone, null);
+  ok(await L.patch('/api/me', { name: 'Old User 2' }), 'legacy user can edit profile without adding a phone');
+  // long-poll: returns at once when the counter differs, waits when not, wakes on a change
+  const s0 = ok(await B.get('/api/sync?c=0'));
+  const t0 = realNow(); const s1 = ok(await B.get(`/api/sync?c=${s0.c}&b=${s0.b}&w=1500`)); assert.ok(realNow() - t0 >= 1200, 'waited with no change');
+  const waiting = B.get(`/api/sync?c=${s1.c}&b=${s1.b}&w=8000`); const t1 = realNow();
+  await new Promise((r) => setTimeout(r, 300));
+  const lm = ok(await A.post(`/api/chats/${direct.id}/messages`, { type: 'location', meta: { lat: 25.3176, lng: 82.9739, acc: 12, label: 'Ghat' } })).message;
+  const s2 = ok(await waiting); assert.ok(realNow() - t1 < 3000, 'woke early on change'); assert.ok(s2.messages.some((m) => m.id === lm.id && m.meta.lat === 25.3176));
+  assert.equal((await A.post(`/api/chats/${direct.id}/messages`, { type: 'location', meta: { lat: 500, lng: 1 } })).status, 400);
+  const cm = ok(await A.post(`/api/chats/${direct.id}/messages`, { type: 'contact', meta: { user_id: uc.id } })).message; assert.equal(cm.meta.username, 'chitra');
+  // notify endpoint (Android background check)
+  const nt = ok(await B.get('/api/notify?since=' + (Date.now() - 60000))); assert.ok(nt.messages.some((m) => m.text.includes('Location')), 'notify lists new messages'); assert.equal(nt.app_name, 'AverChat');
+  // invite links
+  const g = ok(await A.post('/api/chats/group', { name: 'Invite test', members: [ub.id] })).chat;
+  assert.equal((await B.get(`/api/chats/${g.id}/invite`)).status, 403, 'members cannot get link');
+  const inv = ok(await A.post(`/api/chats/${g.id}/invite`, {})); assert.ok(inv.url.includes('/join/' + inv.code));
+  assert.equal(ok(await L.get('/api/invite/' + inv.code)).chat.name, 'Invite test');
+  ok(await L.post(`/api/invite/${inv.code}/join`, {})); assert.ok(ok(await L.get(`/api/chats/${g.id}`)).members.some((x) => x.user_id === lu.id));
+  const inv2 = ok(await A.post(`/api/chats/${g.id}/invite`, { reset: true })); assert.notEqual(inv2.code, inv.code); assert.equal((await B.get('/api/invite/' + inv.code)).status, 404, 'old link dead');
+  // channels
+  const ch = ok(await A.post('/api/chats/channel', { name: 'News', public: true })).chat; assert.ok(ch.channel && ch.only_admins);
+  assert.ok(ok(await L.get('/api/channels')).channels.some((x) => x.id === ch.id)); ok(await L.post(`/api/chats/${ch.id}/join`, {}));
+  assert.equal((await L.post(`/api/chats/${ch.id}/messages`, { body: 'hi' })).status, 403, 'followers cannot post');
+  ok(await A.post(`/api/chats/${ch.id}/messages`, { body: 'Update 1' }));
+  // admin: brand, users, password, delete
+  const AD = client('2.2.2.2'); ok(await AD.post('/api/auth/login', { id: 'admin', password: 'Admin-pass-123' }));
+  assert.equal((await B.get('/api/admin/brand')).status, 403);
+  const br = ok(await AD.post('/api/admin/brand', { app_name: 'TestChat', accent: '#2563eb', bubble_out: '#1d4ed8', theme: 'light', font: 'poppins', layout: 'compact', screenshots: false, bg_video: 'default:waves' })).brand;
+  assert.equal(br.app_name, 'TestChat'); assert.equal(br.screenshots, false);
+  const cfg = ok(await X.get('/api/config')); assert.equal(cfg.brand.app_name, 'TestChat'); assert.equal(cfg.brand.accent, '#2563eb'); assert.equal(cfg.brand.bg_video, 'default:waves');
+  assert.equal((await AD.post('/api/admin/brand', { accent: 'red' })).status, 400); assert.equal((await AD.post('/api/admin/brand', { bg_video: 'file:f_nope' })).status, 400);
+  const sy = ok(await B.get('/api/sync?c=0')); assert.equal(sy.brand_v, br.v, 'sync carries the brand version');
+  const up = await AD.call('POST', '/api/upload?scope=brand&name=logo.png', new Uint8Array([137, 80, 78, 71, 1, 2, 3]), { headers: { 'content-type': 'image/png' } }); assert.equal(up.status, 200);
+  assert.equal((await B.call('POST', '/api/upload?scope=brand&name=x.png', new Uint8Array([1]), { headers: { 'content-type': 'image/png' } })).status, 403);
+  ok(await AD.post('/api/admin/brand', { logo: up.data.file.id })); assert.equal((await X.get('/api/brand/' + up.data.file.id)).status, 200, 'brand file public');
+  const ul = ok(await AD.get('/api/admin/users?q=bilal')).users[0]; assert.equal(ul.email, 'bilal@example.com'); assert.equal(ul.phone, '+919000000002'); assert.ok(!('pw_hash' in ul), 'no password hash exposed');
+  ok(await AD.post(`/api/admin/users/${ub.id}/password`, { password: 'reset-pass-77' }));
+  const B2 = client('1.1.1.22'); ok(await B2.post('/api/auth/login', { id: 'bilal', password: 'reset-pass-77' }), 'new password works');
+  assert.equal((await client('1.1.1.23').post('/api/auth/login', { id: 'bilal', password: 'secret-pass-2' })).status, 401, 'old password dead');
+  ok(await AD.call('DELETE', `/api/admin/users/${lu.id}`));
+  assert.equal((await L.get('/api/me')).status, 401, 'deleted user logged out');
+  assert.equal((await client('1.1.1.24').post('/api/auth/login', { id: 'oldie', password: 'legacy-pass-1' })).status, 401, 'deleted user cannot log in');
+  assert.ok(!ok(await AD.get('/api/admin/users?q=oldie')).users.length);
+  assert.equal((await AD.call('DELETE', '/api/admin/users/u_admin')).status, 400, 'admin not deletable');
+  ok(await AD.post('/api/admin/brand', { reset: true })); assert.equal(ok(await X.get('/api/config')).brand.app_name, 'AverChat');
 });

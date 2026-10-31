@@ -1,7 +1,8 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Avermessage</string>
-    <string name="title_activity_main">Avermessage</string>
+    <string name="app_name">AverChat</string>
+    <string name="title_activity_main">AverChat</string>
     <string name="package_name">bot.tab.sites.avermessage</string>
     <string name="custom_url_scheme">bot.tab.sites.avermessage</string>
+    <string name="averchat_server" translatable="false">https://avermessage.sites.tab.bot</string>
 </resources>
