@@ -5,7 +5,13 @@ location and contact sharing, replies, reactions, polls, status, 1:1 voice/video
 
 * Web app + API: `site/` — a Cloudflare Worker (`_worker.js`, D1 database, R2 file storage) serving a vanilla-JS app.
 * Android app: `app/` — Capacitor 7 shell around the web app (package `bot.tab.sites.avermessage`, so it updates the old Avermessage app).
-  Adds screenshot blocking (FLAG_SECURE, controlled by the admin), background message checks (WorkManager, about every 15 minutes) and native downloads.
+  Adds screenshot blocking (FLAG_SECURE, controlled by the admin), native downloads, and notifications when the app is closed:
+  * 2.0.1 "Instant notifications" (default on, switch in Me > Notifications): a foreground service (`InstantService`, type remoteMessaging on Android 14+, dataSync on 10-13)
+    keeps one long-poll request open to `/api/notify` (held up to ~28 s by the server, answered the moment something changes) using the app's own login cookie,
+    posts one notification per chat (respects mute, block, chat lock and "show preview"; tap opens the chat), restarts after reboot / app update, reconnects on network change.
+    A quiet "AverChat connected" notification shows while it runs (its channel can be turned off in phone settings).
+  * A one-time setup screen (`SetupActivity`, Hinglish) asks for notification permission, unrestricted battery, and autostart on Vivo / Xiaomi / Oppo-type phones.
+  * The old WorkManager check (about every 15 minutes) stays as a fallback.
 * Admin desktop app: `admin-app/` — Electron wrapper around `/admin` (Windows portable .exe via electron-builder).
 * Brand assets: `brand/`. Tests: `test/` (`node test/api.test.mjs` against a local dev server, `tools/dev-server.mjs`).
 

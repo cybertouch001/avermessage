@@ -434,5 +434,12 @@ export const HI = {
 "{n} scheduled message(s)": "{n} शेड्यूल मैसेज",
 "{n} turned the camera off": "{n} ने कैमरा बंद किया",
 "{n} update(s) · tap to view": "{n} स्टेटस · देखने के लिए दबाएँ",
-"“{n}” is larger than 50 MB": "“{n}” 50 MB से बड़ी है"
+"“{n}” is larger than 50 MB": "“{n}” 50 MB से बड़ी है",
+"Instant notifications": "तुरंत नोटिफ़िकेशन",
+"Messages arrive within seconds even when the app is closed. Shows a small “AverChat connected” notification (you can hide it in phone settings).": "ऐप बंद हो तब भी मैसेज कुछ सेकंड में आते हैं। एक छोटा “AverChat connected” नोटिफ़िकेशन दिखता है (फ़ोन सेटिंग्स से छुपा सकते हैं)।",
+"Battery & autostart settings": "बैटरी और ऑटोस्टार्ट सेटिंग्स",
+"Battery: unrestricted ✓": "बैटरी: अनरिस्ट्रिक्टेड ✓",
+"Allow unrestricted battery so the phone does not stop AverChat": "बैटरी अनरिस्ट्रिक्टेड करें ताकि फ़ोन AverChat को बंद न करे",
+"Instant notifications are on: new messages show up within seconds, even when AverChat is closed. Some phones (Vivo, Xiaomi, Oppo) still stop apps unless battery is set to unrestricted and autostart is on.": "तुरंत नोटिफ़िकेशन चालू हैं: AverChat बंद हो तब भी नए मैसेज कुछ सेकंड में दिखेंगे। कुछ फ़ोन (Vivo, Xiaomi, Oppo) बैटरी अनरिस्ट्रिक्टेड और ऑटोस्टार्ट चालू किए बिना ऐप बंद कर देते हैं।",
+"Instant notifications are off: when AverChat is closed the phone checks for new messages about every 15 minutes.": "तुरंत नोटिफ़िकेशन बंद हैं: AverChat बंद होने पर फ़ोन लगभग हर 15 मिनट में नए मैसेज देखता है।"
 };

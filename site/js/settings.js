@@ -96,12 +96,18 @@ function chatsSettings() {
 }
 function notifSettings() {
   const d = App.openDrawer(t('Notifications'), '');
+  const N = App.nativeNotify && App.nativeNotify(); let ns = { instant: true, battery: true };
+  if (N) { N.getState().then((r) => { ns = r; render(); }).catch(() => {}); document.addEventListener('visibilitychange', () => { if (!document.hidden && N) N.getState().then((r) => { ns = r; if (d.body.isConnected) render(); }).catch(() => {}); }); }
   const render = () => {
     const st = S.me.settings || {}; const perm = isApp() ? '' : ('Notification' in window ? Notification.permission : 'unsupported');
     d.body.innerHTML = `<div class="card"><button class="row" id="ns-perm"><span class="ic">${ICON.bell}</span><span class="row-main">${t('Allow notifications on this device')}<span class="sub">${perm === 'granted' ? t('Allowed') : perm === 'denied' ? t('Blocked in browser settings') : perm === 'unsupported' ? t('Not supported in this browser') : t('Tap to allow')}</span></span></button>
       <label class="row"><span class="row-main">${t('Sounds')}<span class="sub">${t('Play a sound for new messages while the app is open')}</span></span><input type="checkbox" id="ns-snd" ${st.sounds !== false ? 'checked' : ''}></label>
       <label class="row"><span class="row-main">${t('Show message preview')}</span><input type="checkbox" id="ns-prev" ${st.preview !== false ? 'checked' : ''}></label></div>
-      <p class="fine pad">${ICON.info} ${t('Notifications arrive while AverChat is open or in the background. When the app or browser is fully closed, new messages show up the next time you open it.')}</p>`;
+      ${N ? `<div class="card"><label class="row"><span class="row-main">${t('Instant notifications')}<span class="sub">${t('Messages arrive within seconds even when the app is closed. Shows a small “AverChat connected” notification (you can hide it in phone settings).')}</span></span><input type="checkbox" id="ns-inst" ${ns.instant ? 'checked' : ''}></label>
+      <button class="row" id="ns-batt"><span class="ic">${ICON.settings}</span><span class="row-main">${t('Battery & autostart settings')}<span class="sub">${ns.battery ? t('Battery: unrestricted ✓') : t('Allow unrestricted battery so the phone does not stop AverChat')}</span></span></button></div>` : ''}
+      <p class="fine pad">${ICON.info} ${N ? (ns.instant ? t('Instant notifications are on: new messages show up within seconds, even when AverChat is closed. Some phones (Vivo, Xiaomi, Oppo) still stop apps unless battery is set to unrestricted and autostart is on.') : t('Instant notifications are off: when AverChat is closed the phone checks for new messages about every 15 minutes.')) : t('Notifications arrive while AverChat is open or in the background. When the app or browser is fully closed, new messages show up the next time you open it.')}</p>`;
+    const inst = $('#ns-inst', d.body); if (inst) inst.onchange = async (e) => { try { const r = await N.setInstant({ on: e.target.checked }); App.nativeInstant = !!r.instant; ns = r; } catch {} render(); };
+    const batt = $('#ns-batt', d.body); if (batt) batt.onclick = () => { N.openSetup().catch(() => {}); };
     $('#ns-perm', d.body).onclick = async () => { const r = await App.notifPermission(); toast(r === 'granted' ? t('Notifications allowed') : t('Notifications not allowed')); render(); };
     $('#ns-snd', d.body).onchange = (e) => setSetting('sounds', e.target.checked); $('#ns-prev', d.body).onchange = (e) => setSetting('preview', e.target.checked);
   };

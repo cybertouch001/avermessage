@@ -4,7 +4,7 @@
 // a custom header on every write (CSRF), every API checks the session, files only for chat members.
 // NOT end-to-end encrypted: data is encrypted in transit (HTTPS) and stored on the server.
 
-const VERSION = '2.0.0';
+const VERSION = '2.0.1';
 const PBKDF2_ITER = 100000;
 const MAX_FILE = 50 * 1024 * 1024;           // 50 MB per file
 const EDIT_WINDOW = 15 * 60 * 1000;          // edit own message within 15 min
@@ -451,16 +451,33 @@ async function api(req, env, url) {
   const now = Date.now();
 
   // ---- background notification check (used by the Android app's periodic worker when the app is closed) ----
+  // v2.0.1: also a long-poll for the app's always-on "Instant notifications" service. The service sends the change counter it
+  // last saw (b) and how long it may wait (w ms, max 30 s); nothing changed -> the request is held. dl=1 marks messages delivered
+  // (grey double tick) like /api/sync does, but never touches last_seen (the user is not shown as online).
   if (p === '/api/notify' && m === 'GET') {
+    if (url.searchParams.get('dl') === '1') {
+      const dn = Date.now();
+      const r0 = await env.DB.prepare(`UPDATE members SET delivered_upto=?, rcpt_ver=? WHERE user_id=? AND left_at IS NULL AND EXISTS (SELECT 1 FROM messages x WHERE x.chat_id=members.chat_id AND x.sender_id<>? AND x.deliver_at>members.delivered_upto AND x.deliver_at<=?)`).bind(dn, dn, me.id, me.id, dn).run();
+      if (r0 && r0.meta && r0.meta.changes > 0) await bumpAll(env);
+    }
+    let nbv = await bumpRead(env);
+    const nseen = url.searchParams.has('b') ? +url.searchParams.get('b') : -1;
+    const nwait = Math.min(Math.max(0, +url.searchParams.get('w') || 0), 30000);
+    if (nwait && nseen === nbv) {
+      const until = Date.now() + nwait;
+      while (Date.now() < until) { await new Promise((r) => setTimeout(r, 1000)); const v = await bumpRead(env); if (v !== nbv) { nbv = v; break; } }
+    }
+    const now = Date.now();
     const since = Math.max(+url.searchParams.get('since') || 0, now - 2 * 86400000);
-    const rows = (await env.DB.prepare(`SELECT m.id, m.chat_id, m.sender_id, m.type, substr(m.body,1,120) AS body, m.meta, m.deliver_at, c.type AS c_type, c.name AS c_name, u.name AS s_name
+    const hidePreview = J(me.settings, {}).preview === false;
+    const rows = (await env.DB.prepare(`SELECT m.id, m.chat_id, m.sender_id, m.type, substr(m.body,1,120) AS body, m.meta, m.deliver_at, c.type AS c_type, c.name AS c_name, u.name AS s_name, cm.locked AS c_locked
       FROM messages m JOIN members cm ON cm.chat_id=m.chat_id AND cm.user_id=? AND cm.left_at IS NULL JOIN chats c ON c.id=m.chat_id JOIN users u ON u.id=m.sender_id
       WHERE m.deliver_at>? AND m.deliver_at<=? AND m.sender_id<>? AND m.deleted=0 AND m.type NOT IN ('system') AND cm.muted_until<? AND m.deliver_at>cm.seen_upto AND m.deliver_at>=cm.joined_at
       AND m.sender_id NOT IN (SELECT blocked_id FROM blocks WHERE user_id=?) ORDER BY m.deliver_at DESC LIMIT 30`).bind(me.id, since, now, me.id, now, me.id).all()).results;
     const ring = (await env.DB.prepare(`SELECT c.id, c.kind, u.name AS caller FROM calls c JOIN users u ON u.id=c.caller_id WHERE c.callee_id=? AND c.status='ringing' AND c.created_at>?`).bind(me.id, now - RING_MS).all()).results;
     const label = (r) => { const mm = J(r.meta, {}); return r.type === 'text' ? r.body : r.type === 'image' ? '📷 Photo' : r.type === 'video' ? '🎥 Video' : r.type === 'voice' ? '🎤 Voice message' : r.type === 'audio' ? '🎵 Audio' : r.type === 'file' ? '📄 ' + (mm.name || 'Document') : r.type === 'poll' ? '📊 ' + (mm.question || 'Poll') : r.type === 'location' ? '📍 Location' : r.type === 'contact' ? '👤 Contact' : r.type === 'call' ? '📞 Call' : 'New message'; };
     const brand = await getBrand(env);
-    return json({ now, app_name: brand.app_name, screenshots: brand.screenshots !== false, messages: rows.map((r) => ({ id: r.id, chat_id: r.chat_id, title: r.c_type === 'group' ? r.c_name : r.s_name, sender: r.s_name, group: r.c_type === 'group', text: label(r), at: r.deliver_at })), calls: ring });
+    return json({ now, b: nbv, app_name: brand.app_name, screenshots: brand.screenshots !== false, messages: rows.map((r) => ({ id: r.id, chat_id: r.chat_id, title: r.c_type === 'group' ? r.c_name : r.s_name, sender: r.s_name, group: r.c_type === 'group', text: hidePreview || r.c_locked ? 'New message' : label(r), at: r.deliver_at })), calls: ring });
   }
   if (p === '/api/sync' && m === 'GET') return json(await sync(env, me, url));
   if (p === '/api/me' && m === 'GET') return json({ user: pubUser(me, me), ice: await iceServers(env), config: await getSetting(env, 'public', {}) });

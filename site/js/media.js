@@ -173,6 +173,13 @@ App.initNotifications = async () => {
   if (isApp()) { const LN = plug('LocalNotifications'); if (LN) { try { const p = await LN.checkPermissions(); if (p.display !== 'granted' && !LS.get('asked-notif')) { LS.set('asked-notif', 1); await LN.requestPermissions(); } LN.addListener && LN.addListener('localNotificationActionPerformed', (a) => { const id = a.notification && a.notification.extra && a.notification.extra.chat; if (id) App.openChat(id); }); } catch {} } }
   if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener && navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.chat) App.openChat(e.data.chat); });
 };
+// 2.0.1 Android app: "Instant notifications" (native always-on service). Older app versions / browsers: plugin missing -> nothing changes.
+App.nativeNotify = () => plug('AvmNotify');
+App.nativeInit = async () => {
+  const N = App.nativeNotify(); if (!N) return;
+  try { const st = await N.refresh(); App.nativeInstant = !!(st && st.instant); } catch {}
+  try { const p = await N.takePendingChat(); if (p && p.chat) window.avmOpenChat && window.avmOpenChat(p.chat); } catch {}
+};
 App.notifPermission = async () => {
   if (isApp()) { const LN = plug('LocalNotifications'); if (!LN) return 'unsupported'; const r = await LN.requestPermissions(); return r.display; }
   if (!('Notification' in window)) return 'unsupported'; return await Notification.requestPermission();
@@ -194,6 +201,7 @@ App.notify = async (c, m) => {
   const st = S.me.settings || {};
   if (!document.hidden && S.open !== c.id) { App.sound('msg'); inAppBanner(c, m, st); }
   if (!document.hidden) return;
+  if (isApp() && App.nativeInstant) return; // the app's instant-notification service posts this one (no duplicates)
   const title = c.type === 'group' ? chatTitle(c) : nameOf(m.sender_id);
   const body = c.locked || st.preview === false ? t('New message') : (c.type === 'group' ? nameOf(m.sender_id) + ': ' : '') + previewText(m);
   if (isApp()) { const LN = plug('LocalNotifications'); if (LN) try { await LN.schedule({ notifications: [{ id: nid++ % 100000, title, body: String(body).slice(0, 200), extra: { chat: c.id }, smallIcon: 'ic_stat_notify' }] }); } catch {} return; }
@@ -201,7 +209,7 @@ App.notify = async (c, m) => {
   try { const reg = await navigator.serviceWorker.getRegistration(); if (reg) reg.showNotification(title, { body, icon: '/icons/icon-192.png', badge: '/icons/icon-96.png', tag: 'chat-' + c.id, data: { chat: c.id } }); else new Notification(title, { body, icon: '/icons/icon-192.png', tag: 'chat-' + c.id }); } catch {}
 };
 App.notifyCall = async (from, kind) => {
-  if (!document.hidden) return; const title = t('Incoming {k}', { k: kind === 'video' ? t('video call') : t('voice call') }); const body = from;
+  if (!document.hidden) return; if (isApp() && App.nativeInstant) return; const title = t('Incoming {k}', { k: kind === 'video' ? t('video call') : t('voice call') }); const body = from;
   if (isApp()) { const LN = plug('LocalNotifications'); if (LN) try { await LN.schedule({ notifications: [{ id: 99001, title, body, smallIcon: 'ic_stat_notify' }] }); } catch {} return; }
   if ('Notification' in window && Notification.permission === 'granted') try { const reg = await navigator.serviceWorker.getRegistration(); if (reg) reg.showNotification(title, { body, icon: '/icons/icon-192.png', tag: 'call', requireInteraction: true }); } catch {}
 };

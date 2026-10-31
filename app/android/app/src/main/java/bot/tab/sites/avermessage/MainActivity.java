@@ -3,6 +3,7 @@ package bot.tab.sites.avermessage;
 import android.Manifest;
 import android.app.DownloadManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -41,17 +42,30 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AvmCallPlugin.class);
         registerPlugin(AvmSecurePlugin.class);
+        registerPlugin(AvmNotifyPlugin.class);
         super.onCreate(savedInstanceState);
         // screenshots: apply the admin's last known choice before anything is drawn
         AvmSecurePlugin.apply(this, AvmSecurePlugin.saved(this));
         NotifyWorker.appAlive = true;
-        NotifyWorker.ensureChannel(this);
-        // background check for new messages while the app is closed (Android runs it about every 15 minutes)
+        // the page's renderer can be killed (low memory on budget phones, or a WebView bug): without this the whole app
+        // closes. Instead: rebuild the page, and after repeated failures show a simple native message with a retry button.
         try {
-            androidx.work.Constraints cons = new androidx.work.Constraints.Builder().setRequiredNetworkType(androidx.work.NetworkType.CONNECTED).build();
-            androidx.work.PeriodicWorkRequest req = new androidx.work.PeriodicWorkRequest.Builder(NotifyWorker.class, 15, java.util.concurrent.TimeUnit.MINUTES).setConstraints(cons).build();
-            androidx.work.WorkManager.getInstance(this).enqueueUniquePeriodicWork("averchat-notify", androidx.work.ExistingPeriodicWorkPolicy.KEEP, req);
-        } catch (Exception ignored) { }
+            if (getBridge() != null) getBridge().addWebViewListener(new com.getcapacitor.WebViewListener() {
+                @Override
+                public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                    onWebCrash(view);
+                    return true;
+                }
+            });
+        } catch (Throwable ignored) { }
+        AvmNotifier.ensureChannels(this);
+        // fallback background check (about every 15 minutes) in case the instant service is off or the phone killed it
+        NotifyWorker.schedule(this);
+        handleOpenChat(getIntent());
+        // one-time "turn on instant notifications" screen after installing / updating to 2.0.1
+        try {
+            if (!AvmNotifier.prefs(this).getBoolean(SetupActivity.DONE_KEY, false)) startActivity(new Intent(this, SetupActivity.class));
+        } catch (Throwable ignored) { }
 
         storagePermission = registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
             DownloadManager.Request r = pendingDownload;
@@ -175,11 +189,78 @@ public class MainActivity extends BridgeActivity {
         return name;
     }
 
+    // ---- page renderer crash recovery ----
+    private static final long[] webCrashes = new long[3];
+    private static int webCrashIdx = 0;
+
+    private void onWebCrash(WebView view) {
+        long now = System.currentTimeMillis();
+        boolean tooMany = now - webCrashes[webCrashIdx] < 60000; // 3 crashes within a minute
+        webCrashes[webCrashIdx] = now; webCrashIdx = (webCrashIdx + 1) % webCrashes.length;
+        runOnUiThread(() -> {
+            try { android.view.ViewParent p = view.getParent(); if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(view); } catch (Throwable ignored) { }
+            if (!tooMany) { try { recreate(); return; } catch (Throwable ignored) { } }
+            showWebError();
+        });
+    }
+
+    private void showWebError() {
+        try {
+            android.widget.LinearLayout box = new android.widget.LinearLayout(this);
+            box.setOrientation(android.widget.LinearLayout.VERTICAL);
+            box.setGravity(android.view.Gravity.CENTER);
+            int pad = (int) (24 * getResources().getDisplayMetrics().density);
+            box.setPadding(pad, pad, pad, pad);
+            box.setBackgroundColor(0xFF0C0718);
+            android.widget.TextView t = new android.widget.TextView(this);
+            t.setText("AverChat ka page abhi load nahi ho paya.\nNotifications chalte rahenge.\n\nDobara try karo, ya phone restart karke kholo.");
+            t.setTextColor(0xFFFFFFFF); t.setTextSize(17); t.setGravity(android.view.Gravity.CENTER);
+            box.addView(t);
+            android.widget.Button b = new android.widget.Button(this);
+            b.setText("Dobara try karo"); b.setAllCaps(false);
+            b.setOnClickListener(v -> { try { recreate(); } catch (Throwable ignored) { } });
+            box.addView(b);
+            setContentView(box);
+        } catch (Throwable ignored) { }
+    }
+
+    // ---- instant notifications: foreground state, login copy, tapped-notification -> open that chat ----
+    static volatile boolean foreground = false;
+    private static volatile String pendingChat = null;
+
+    /** The app is on screen: the page shows its own banner/sound, so no Android notification for any chat. */
+    static boolean isChatVisible(String chatId) { return foreground; }
+
+    static String takePendingChat() { String c = pendingChat; pendingChat = null; return c; }
+
+    private void handleOpenChat(Intent i) {
+        try {
+            if (i == null) return;
+            String c = i.getStringExtra(AvmNotifier.EXTRA_CHAT);
+            if (c == null || !c.matches("[A-Za-z0-9_-]{1,80}")) return;
+            i.removeExtra(AvmNotifier.EXTRA_CHAT);
+            pendingChat = c;
+            // page already running: ask it to open the chat (if it is still loading it picks it up via takePendingChat)
+            if (getBridge() != null && getBridge().getWebView() != null) {
+                final String js = "window.avmOpenChat&&window.avmOpenChat('" + c + "')";
+                getBridge().getWebView().postDelayed(() -> { try { if (pendingChat != null) getBridge().getWebView().evaluateJavascript(js, null); } catch (Throwable ignored) {} }, 400);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        handleOpenChat(intent);
+    }
+
     @Override
     public void onDestroy() {
         NotifyWorker.appAlive = false;
+        foreground = false;
         // messages that arrived while the app was open were already shown by the page
         getSharedPreferences(AvmSecurePlugin.PREFS, MODE_PRIVATE).edit().putLong("notify_since", System.currentTimeMillis()).apply();
+        InstantService.poke();
         super.onDestroy();
     }
 
@@ -187,6 +268,20 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
         NotifyWorker.appAlive = true;
+        foreground = true;
+        AvmNotifier.resetStacks(this);
         AvmSecurePlugin.apply(this, AvmSecurePlugin.saved(this));
+        try { AvmNotifier.captureToken(this); InstantService.start(this); } catch (Throwable ignored) { }
+    }
+
+    @Override
+    public void onPause() {
+        foreground = false;
+        try {
+            getSharedPreferences(AvmSecurePlugin.PREFS, MODE_PRIVATE).edit().putLong("notify_since", System.currentTimeMillis() - 3000).apply();
+            AvmNotifier.captureToken(this);
+            InstantService.poke(); // leave the idle wait and start listening now
+        } catch (Throwable ignored) { }
+        super.onPause();
     }
 }

@@ -50,7 +50,7 @@ function renderAuth(mode = 'login') {
   };
 }
 App.loggedOut = () => { if (!S.me) return; S.me = null; stopSync(); location.reload(); };
-export async function logout() { try { await api('/api/auth/logout', { body: {} }); } catch {} S.me = null; stopSync(); location.href = '/'; }
+export async function logout() { try { await api('/api/auth/logout', { body: {} }); } catch {} try { const N = plug('AvmNotify'); if (N) await N.loggedOut(); } catch {} S.me = null; stopSync(); location.href = '/'; }
 App.logout = logout;
 
 // ---------- boot ----------
@@ -70,6 +70,8 @@ async function start(meResp) {
   if (!meResp) { const r = await api('/api/me'); S.me = r.user; S.ice = r.ice; }
   await App.loadConfig();
   applyTheme(); renderShell(); await loadChats(); startSync(); App.initNotifications && App.initNotifications();
+  window.avmOpenChat = async (id) => { try { if (!S.chats.has(id)) await loadChats(); if (S.chats.has(id)) App.openChat(id); } catch {} };
+  App.nativeInit && App.nativeInit();
   const h = location.hash.match(/^#chat=([\w-]+)/); if (h && S.chats.has(h[1])) App.openChat(h[1]);
   App.handleJoinPath && App.handleJoinPath();
   if ('serviceWorker' in navigator && !isApp()) navigator.serviceWorker.register('/sw.js').catch(() => {});

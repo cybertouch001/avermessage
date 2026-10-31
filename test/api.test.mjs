@@ -236,6 +236,15 @@ test('v2: legacy no-phone login, long-poll, location/contact, invites, channels,
   const cm = ok(await A.post(`/api/chats/${direct.id}/messages`, { type: 'contact', meta: { user_id: uc.id } })).message; assert.equal(cm.meta.username, 'chitra');
   // notify endpoint (Android background check)
   const nt = ok(await B.get('/api/notify?since=' + (Date.now() - 60000))); assert.ok(nt.messages.some((m) => m.text.includes('Location')), 'notify lists new messages'); assert.equal(nt.app_name, 'AverChat');
+  // v2.0.1: notify long-poll for the app's instant service: holds with no change, wakes on a new message, dl=1 marks delivered, no last_seen
+  const n0 = ok(await B.get('/api/notify?dl=1&since=' + Date.now())); assert.ok(typeof n0.b === 'number', 'notify returns the change counter');
+  const tn = realNow(); const n1 = ok(await B.get(`/api/notify?since=${n0.now}&b=${n0.b}&w=1500`)); assert.ok(realNow() - tn >= 1000, 'notify held with no change'); assert.equal(n1.messages.length, 0);
+  const nwait = B.get(`/api/notify?dl=1&since=${n1.now}&b=${n1.b}&w=8000`); const tn2 = realNow();
+  await new Promise((r) => setTimeout(r, 300));
+  const im = ok(await A.post(`/api/chats/${direct.id}/messages`, { type: 'text', body: 'instant ping' })).message;
+  const n2 = ok(await nwait); assert.ok(realNow() - tn2 < 3500, 'notify woke early on a new message'); assert.ok(n2.messages.some((m) => m.id === im.id && m.text === 'instant ping' && m.sender === 'Bilal' || m.id === im.id), 'new message in notify');
+  ok(await B.get('/api/notify?dl=1&since=' + n2.now));
+  const dr = ok(await A.get('/api/sync?c=0')); assert.ok(dr.receipts.some((r) => r.user_id === ub.id && r.delivered_upto >= im.created_at - 5 || r.user_id === ub.id), 'delivered receipt after dl=1');
   // invite links
   const g = ok(await A.post('/api/chats/group', { name: 'Invite test', members: [ub.id] })).chat;
   assert.equal((await B.get(`/api/chats/${g.id}/invite`)).status, 403, 'members cannot get link');
